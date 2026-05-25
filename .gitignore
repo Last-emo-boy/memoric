@@ -62,8 +62,8 @@ coverage/
 *.zip
 *.7z
 
-# ── Local reference docs ──────────────────────────
-docs/
+# ── Local reference docs (generated docs are tracked for include_str!) ──
+!docs/
 
 # ── Temporary & misc ──────────────────────────────
 /tmp/

@@ -1,0 +1,196 @@
+{
+  "generatedAt": "deterministic-runtime-server-manifest",
+  "generatedFrom": "runtime initialize, tools/list, resources/list via cargo run --quiet plus Cargo.toml package metadata",
+  "machineStateIncluded": false,
+  "server": {
+    "name": "memoric",
+    "package": "memoric",
+    "version": "0.1.0",
+    "description": "A red team memory weapon MCP Server for Windows",
+    "license": "MIT",
+    "protocolVersion": "2025-11-25"
+  },
+  "capabilities": {
+    "experimental": {
+      "progress": true,
+      "structuredContent": true,
+      "tasks": true
+    },
+    "logging": {},
+    "prompts": {},
+    "resources": {
+      "templates": {}
+    },
+    "tasks": {
+      "cancel": {},
+      "inputResponse": {},
+      "list": {},
+      "requests": {
+        "sampling": {
+          "createMessage": {
+            "supported": false,
+            "taskLifecycle": "reuse-existing-task-registry-when-implemented"
+          }
+        },
+        "tools": {
+          "call": {}
+        }
+      },
+      "update": {}
+    },
+    "tools": {
+      "listChanged": false
+    }
+  },
+  "counts": {
+    "tools": 12,
+    "resources": 13,
+    "resourceTemplates": 4
+  },
+  "toolCatalog": {
+    "path": "docs/tool-catalog.json",
+    "generatedAt": "deterministic-runtime-tools-list",
+    "sha256": "020bf560dc3e136f2916e23396b93b25fff2ce09b50d0977d83fadac9c82016f",
+    "toolCount": 12,
+    "resourceCount": 13,
+    "resourceTemplateCount": 4
+  },
+  "resources": [
+    {
+      "uri": "memoric://status",
+      "name": "Server Status",
+      "description": "Current memoric server status, privilege level, and capabilities",
+      "mimeType": "application/json"
+    },
+    {
+      "uri": "memoric://capabilities",
+      "name": "Capabilities",
+      "description": "Runtime readiness, policy, and action registry summary",
+      "mimeType": "application/json"
+    },
+    {
+      "uri": "memoric://policy",
+      "name": "Policy",
+      "description": "Current policy level, consent, and audit configuration",
+      "mimeType": "application/json"
+    },
+    {
+      "uri": "memoric://tasks",
+      "name": "Tasks",
+      "description": "Process-local MCP task registry",
+      "mimeType": "application/json"
+    },
+    {
+      "uri": "memoric://audit/recent",
+      "name": "Recent Audit",
+      "description": "Recent JSONL audit entries when MEMORIC_AUDIT_PATH is configured",
+      "mimeType": "application/json"
+    },
+    {
+      "uri": "memoric://artifacts",
+      "name": "Artifact Registry",
+      "description": "Process-local artifact resource links with retention and integrity metadata",
+      "mimeType": "application/json"
+    },
+    {
+      "uri": "memoric://timeline",
+      "name": "Observability Timeline",
+      "description": "Read-only timeline linking MCP requests, tasks, audit entries, worker IPC, and artifacts by correlation ID",
+      "mimeType": "application/json"
+    },
+    {
+      "uri": "ui://memoric/dashboard",
+      "name": "Memoric Dashboard UI Data",
+      "description": "Read-only MCP Apps dashboard hydration data for tasks, policy, audit, capabilities, artifacts, and timeline",
+      "mimeType": "text/html;profile=mcp-app"
+    },
+    {
+      "uri": "ui://memoric/scans",
+      "name": "Memoric Scan Explorer UI Data",
+      "description": "Read-only MCP Apps scan explorer hydration data with bounded scan session and candidate pages",
+      "mimeType": "text/html;profile=mcp-app"
+    },
+    {
+      "uri": "ui://memoric/plans",
+      "name": "Memoric Plan Review UI Data",
+      "description": "Read-only MCP Apps plan review hydration data for dry-run plans, templates, blocked steps, and capability blockers",
+      "mimeType": "text/html;profile=mcp-app"
+    },
+    {
+      "uri": "memoric://processes",
+      "name": "Process List",
+      "description": "Running processes on the target system",
+      "mimeType": "application/json"
+    },
+    {
+      "uri": "memoric://scan-sessions",
+      "name": "Scan Sessions",
+      "description": "Active memory scan sessions",
+      "mimeType": "application/json"
+    },
+    {
+      "uri": "memoric://drivers",
+      "name": "Loaded Drivers",
+      "description": "Available BYOVD drivers and their status",
+      "mimeType": "application/json"
+    }
+  ],
+  "resourceTemplates": [
+    {
+      "uriTemplate": "ui://memoric/dashboard{?limit,correlation_id}",
+      "name": "Memoric Dashboard",
+      "description": "Read-only operation dashboard for task status, policy, audit, capability readiness, artifacts, and timeline context",
+      "mimeType": "text/html;profile=mcp-app"
+    },
+    {
+      "uriTemplate": "ui://memoric/scans{?session_id,limit,offset,cursor,sort,summary_only}",
+      "name": "Memoric Scan Explorer",
+      "description": "Read-only scan session explorer with bounded pagination and strict default redaction",
+      "mimeType": "text/html;profile=mcp-app"
+    },
+    {
+      "uriTemplate": "ui://memoric/plans{?template,limit,offset,cursor,dry_run}",
+      "name": "Memoric Plan Review",
+      "description": "Read-only orchestration plan review for effective plans, blocked steps, policy decisions, templates, and capability blockers",
+      "mimeType": "text/html;profile=mcp-app"
+    },
+    {
+      "uriTemplate": "memoric://artifact/sha256/{sha256}",
+      "name": "Artifact By SHA-256",
+      "description": "Retention-bound artifact resource content with SHA-256 verification",
+      "mimeType": "application/octet-stream"
+    }
+  ],
+  "docs": [
+    {
+      "path": "docs/invocation-contract.md",
+      "kind": "contract"
+    },
+    {
+      "path": "docs/compatibility.md",
+      "kind": "compatibility"
+    },
+    {
+      "path": "docs/tool-reference.md",
+      "kind": "tool-reference"
+    },
+    {
+      "path": "docs/tool-catalog.json",
+      "kind": "tool-catalog"
+    },
+    {
+      "path": "docs/server-manifest.json",
+      "kind": "server-manifest"
+    }
+  ],
+  "provenance": {
+    "source": "generated",
+    "deterministic": true,
+    "runtimeRequests": [
+      "initialize",
+      "tools/list",
+      "resources/list",
+      "resources/templates/list"
+    ]
+  }
+}
