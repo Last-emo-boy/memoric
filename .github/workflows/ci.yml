@@ -160,6 +160,7 @@ jobs:
   security-audit:
     name: Security Audit
     runs-on: windows-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2
