@@ -6,13 +6,17 @@
 //! - Proxy mode (--proxy): Normal privileges, handles STDIO with Claude Desktop + UAC elevation
 //! - Worker mode (--worker): Elevated privileges, executes privileged operations via Named Pipe
 
-// MCP tools are dispatched dynamically via string matching in call_tool()
+// MCP tools are dispatched through the mcp::tool_call facade.
 // so the compiler can't trace usage of pub functions across module boundaries
 #![allow(dead_code, unused_variables)]
 
+mod args;
+mod artifact;
+mod audit;
 mod bruteforce;
 mod byovd;
 mod bypass_db;
+mod capability;
 mod crypto;
 mod driver;
 mod elevation;
@@ -22,13 +26,18 @@ mod info;
 mod inject;
 mod ipc;
 mod kernel;
+mod kernel_offsets;
 mod mcp;
 mod memory;
+mod observability;
 mod opsec_cleanup;
 mod orchestration;
+mod policy;
 mod privilege;
 mod proxy;
+mod redaction;
 mod redteam;
+mod runtime;
 mod safe_handle;
 mod state;
 mod stdio_server;

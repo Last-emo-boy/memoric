@@ -4,6 +4,25 @@ use crate::error::MemoricError;
 use crate::safe_handle::SafeHandle;
 use crate::util::parse_address;
 use serde_json::Value;
+use windows::Win32::System::Memory::PAGE_PROTECTION_FLAGS;
+
+fn parse_memory_protect_flag(value: Option<&Value>) -> PAGE_PROTECTION_FLAGS {
+    value
+        .and_then(crate::args::parse_protection_value)
+        .map(PAGE_PROTECTION_FLAGS)
+        .unwrap_or(windows::Win32::System::Memory::PAGE_EXECUTE_READWRITE)
+}
+
+fn protect_label(value: Option<&Value>) -> String {
+    value
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| value.as_u64().map(|number| number.to_string()))
+        })
+        .unwrap_or_else(|| "RWX".to_string())
+}
 
 /// Query memory regions
 pub fn query_regions(args: &Value) -> Result<Value, MemoricError> {
@@ -83,18 +102,9 @@ pub fn virtual_alloc_ex(args: &Value) -> Result<Value, MemoricError> {
         .get("size")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| MemoricError::MemoryAccess("Missing size".to_string()))?;
-    let protect = args
-        .get("protect")
-        .and_then(|v| v.as_str())
-        .unwrap_or("RWX");
-
-    let protect_flag = match protect {
-        "RWX" => windows::Win32::System::Memory::PAGE_EXECUTE_READWRITE,
-        "RW" => windows::Win32::System::Memory::PAGE_READWRITE,
-        "RX" => windows::Win32::System::Memory::PAGE_EXECUTE_READ,
-        "R" => windows::Win32::System::Memory::PAGE_READONLY,
-        _ => windows::Win32::System::Memory::PAGE_EXECUTE_READWRITE,
-    };
+    let protect_value = args.get("protect").or_else(|| args.get("protection"));
+    let protect = protect_label(protect_value);
+    let protect_flag = parse_memory_protect_flag(protect_value);
 
     // Auto-enable SeDebugPrivilege (best-effort)
     let _ = crate::privilege::enable_debug_privilege(&serde_json::json!({}));
@@ -118,10 +128,13 @@ pub fn virtual_alloc_ex(args: &Value) -> Result<Value, MemoricError> {
             ));
         }
 
+        let address = remote_mem as u64;
         Ok(serde_json::json!({
-            "address": format!("0x{:016X}", remote_mem as usize),
+            "address": crate::memory::rollback::format_address(address),
             "size": size,
-            "protect": protect
+            "protect": protect,
+            "protect_flag": protect_flag.0,
+            "rollback": crate::memory::rollback::free_allocated_region_rollback(pid, address, size)
         }))
     }
 }
@@ -161,7 +174,8 @@ pub fn virtual_free_ex(args: &Value) -> Result<Value, MemoricError> {
                 "freed": false,
                 "already_free": true,
                 "address": format!("0x{:016X}", address),
-                "message": "Address is already free; no action needed"
+                "message": "Address is already free; no action needed",
+                "rollback": crate::memory::rollback::irreversible_free_rollback(pid, address)
             }));
         }
 
@@ -172,7 +186,8 @@ pub fn virtual_free_ex(args: &Value) -> Result<Value, MemoricError> {
                 "success": true,
                 "freed": true,
                 "already_free": false,
-                "address": format!("0x{:016X}", address)
+                "address": format!("0x{:016X}", address),
+                "rollback": crate::memory::rollback::irreversible_free_rollback(pid, address)
             }))
         } else {
             let err = windows::core::Error::from_win32();
@@ -181,7 +196,8 @@ pub fn virtual_free_ex(args: &Value) -> Result<Value, MemoricError> {
                 "freed": false,
                 "already_free": false,
                 "address": format!("0x{:016X}", address),
-                "error": err.to_string()
+                "error": err.to_string(),
+                "rollback": crate::memory::rollback::irreversible_free_rollback(pid, address)
             }))
         }
     }
@@ -189,9 +205,7 @@ pub fn virtual_free_ex(args: &Value) -> Result<Value, MemoricError> {
 
 /// VirtualProtectEx wrapper
 pub fn virtual_protect_ex(args: &Value) -> Result<Value, MemoricError> {
-    use windows::Win32::System::Memory::{
-        VirtualProtectEx, PAGE_EXECUTE_READWRITE, PAGE_PROTECTION_FLAGS, PAGE_READWRITE,
-    };
+    use windows::Win32::System::Memory::VirtualProtectEx;
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_VM_OPERATION};
 
     let pid = args
@@ -203,16 +217,9 @@ pub fn virtual_protect_ex(args: &Value) -> Result<Value, MemoricError> {
         .and_then(parse_address)
         .ok_or_else(|| MemoricError::MemoryAccess("Missing address".to_string()))?;
     let size = args.get("size").and_then(|v| v.as_u64()).unwrap_or(4096);
-    let protect = args
-        .get("protect")
-        .and_then(|v| v.as_str())
-        .unwrap_or("RWX");
-
-    let protect_flag = match protect {
-        "RWX" => PAGE_EXECUTE_READWRITE,
-        "RW" => PAGE_READWRITE,
-        _ => PAGE_EXECUTE_READWRITE,
-    };
+    let protect_value = args.get("protect").or_else(|| args.get("protection"));
+    let protect = protect_label(protect_value);
+    let protect_flag = parse_memory_protect_flag(protect_value);
 
     unsafe {
         let handle = OpenProcess(PROCESS_VM_OPERATION, false, pid as u32)
@@ -231,7 +238,131 @@ pub fn virtual_protect_ex(args: &Value) -> Result<Value, MemoricError> {
 
         Ok(serde_json::json!({
             "success": true,
-            "old_protect": old_protect.0
+            "address": crate::memory::rollback::format_address(address),
+            "size": size,
+            "protect": protect,
+            "new_protect": protect,
+            "new_protect_flag": protect_flag.0,
+            "old_protect": old_protect.0,
+            "rollback": crate::memory::rollback::restore_previous_protection_rollback(
+                pid,
+                address,
+                size,
+                old_protect.0,
+            )
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn virtual_alloc_reports_executable_free_rollback() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let result = virtual_alloc_ex(&json!({
+            "pid": std::process::id(),
+            "size": 4096,
+            "protect": "RW"
+        }))
+        .expect("virtual_alloc_ex should allocate in current process");
+
+        assert_eq!(result["size"], 4096);
+        assert_eq!(result["rollback"]["available"], true);
+        assert_eq!(result["rollback"]["strategy"], "free_allocated_region");
+        assert_eq!(result["rollback"]["action"]["tool"], "memory");
+        assert_eq!(result["rollback"]["action"]["action"], "free");
+        assert_eq!(
+            result["rollback"]["action"]["args"]["address"],
+            result["address"]
+        );
+
+        let _ = virtual_free_ex(&json!({
+            "pid": std::process::id(),
+            "address": result["address"].clone()
+        }));
+    }
+
+    #[test]
+    fn virtual_protect_reports_restore_previous_protection_rollback() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let mut buffer = vec![0u8; 4096];
+        let address = buffer.as_mut_ptr() as u64;
+
+        let result = virtual_protect_ex(&json!({
+            "pid": std::process::id(),
+            "address": address,
+            "size": 4096,
+            "protect": "RW"
+        }))
+        .expect("virtual_protect_ex should protect current process buffer");
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["rollback"]["available"], true);
+        assert_eq!(
+            result["rollback"]["strategy"],
+            "restore_previous_protection"
+        );
+        assert_eq!(result["rollback"]["old_protection"], result["old_protect"]);
+        assert_eq!(result["rollback"]["action"]["tool"], "memory");
+        assert_eq!(result["rollback"]["action"]["action"], "protect");
+        assert_eq!(
+            result["rollback"]["action"]["args"]["protect"],
+            result["old_protect"]
+        );
+
+        let _ = virtual_protect_ex(&json!({
+            "pid": std::process::id(),
+            "address": address,
+            "size": 4096,
+            "protect": result["old_protect"].clone()
+        }));
+    }
+
+    #[test]
+    fn virtual_free_reports_irreversible_rollback_metadata() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let alloc = virtual_alloc_ex(&json!({
+            "pid": std::process::id(),
+            "size": 4096,
+            "protect": "RW"
+        }))
+        .expect("virtual_alloc_ex should allocate in current process");
+
+        let result = virtual_free_ex(&json!({
+            "pid": std::process::id(),
+            "address": alloc["address"].clone()
+        }))
+        .expect("virtual_free_ex should free allocation");
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["rollback"]["available"], false);
+        assert_eq!(result["rollback"]["reason"], "irreversible_release");
+        assert_eq!(
+            result["rollback"]["captured_fields"],
+            json!(["pid", "address"])
+        );
+    }
+
+    #[test]
+    fn virtual_protect_accepts_numeric_protection_for_rollback_actions() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let mut buffer = vec![0u8; 4096];
+        let address = buffer.as_mut_ptr() as u64;
+
+        let result = virtual_protect_ex(&json!({
+            "pid": std::process::id(),
+            "address": address,
+            "size": 4096,
+            "protect": 0x04
+        }))
+        .expect("numeric protection should be accepted");
+
+        assert_eq!(result["new_protect_flag"], 0x04);
     }
 }

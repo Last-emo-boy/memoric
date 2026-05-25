@@ -21,35 +21,58 @@ pub struct PipeServer {
     security_descriptor: *mut std::ffi::c_void,
 }
 
+// Windows HANDLE values are process-wide kernel handles. The STDIO bridge uses
+// PipeServer from a reader thread and the main request thread at the same time:
+// reads stay on the reader thread, writes stay on the request thread.
+unsafe impl Send for PipeServer {}
+unsafe impl Sync for PipeServer {}
+
 impl PipeServer {
     /// Create a new Named Pipe server (Proxy side)
     /// Uses a security descriptor that:
     /// - Grants full access to the current user and SYSTEM
     /// - Sets HIGH integrity level mandatory label so only High IL (elevated) processes can connect
     pub fn new() -> Result<Self> {
+        Self::new_with_name(PIPE_NAME)
+    }
+
+    pub(crate) fn new_with_name(pipe_name: &str) -> Result<Self> {
+        Self::new_with_security(pipe_name, true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_test_with_name(pipe_name: &str) -> Result<Self> {
+        Self::new_with_security(pipe_name, false)
+    }
+
+    fn new_with_security(pipe_name: &str, custom_security: bool) -> Result<Self> {
         unsafe {
-            // SDDL: Grant full access to SYSTEM, Administrators, and Creator Owner
-            // No SACL mandatory label — Medium IL process can't set it, and it's not needed:
-            // High IL Worker connecting to Medium IL pipe is allowed by default (high→low is OK)
-            let sddl: Vec<u16> = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;CO)\0"
-                .encode_utf16()
-                .collect();
+            let (sd_raw, should_free) = if custom_security {
+                // SDDL: Grant full access to SYSTEM, Administrators, and Creator Owner.
+                // No SACL mandatory label — Medium IL process can't set it, and it's not needed:
+                // High IL Worker connecting to Medium IL pipe is allowed by default (high→low is OK).
+                let sddl: Vec<u16> = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;CO)\0"
+                    .encode_utf16()
+                    .collect();
 
-            let mut sd_ptr: *mut windows::Win32::Security::SECURITY_DESCRIPTOR =
-                std::ptr::null_mut();
+                let mut sd_ptr: *mut windows::Win32::Security::SECURITY_DESCRIPTOR =
+                    std::ptr::null_mut();
 
-            let ok = ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                PCWSTR(sddl.as_ptr()),
-                1, // SDDL_REVISION_1
-                &mut sd_ptr as *mut _ as *mut _,
-                None,
-            );
+                let ok = ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    PCWSTR(sddl.as_ptr()),
+                    1, // SDDL_REVISION_1
+                    &mut sd_ptr as *mut _ as *mut _,
+                    None,
+                );
 
-            let (sd_raw, should_free) = if ok.is_ok() {
-                tracing::info!("Named Pipe security descriptor created (HIGH IL mandatory label)");
-                (sd_ptr as *mut std::ffi::c_void, true)
+                if ok.is_ok() {
+                    tracing::info!("Named Pipe security descriptor created");
+                    (sd_ptr as *mut std::ffi::c_void, true)
+                } else {
+                    tracing::warn!("Failed to create security descriptor, falling back to default");
+                    (std::ptr::null_mut(), false)
+                }
             } else {
-                tracing::warn!("Failed to create security descriptor, falling back to default");
                 (std::ptr::null_mut(), false)
             };
 
@@ -59,12 +82,12 @@ impl PipeServer {
                 bInheritHandle: false.into(),
             };
 
-            let pipe_name: Vec<u16> = format!("{}\0", PIPE_NAME).encode_utf16().collect();
+            let pipe_name_wide: Vec<u16> = format!("{}\0", pipe_name).encode_utf16().collect();
 
-            tracing::info!("Creating Named Pipe Server: {}", PIPE_NAME);
+            tracing::info!("Creating Named Pipe Server: {}", pipe_name);
 
             let handle = CreateNamedPipeW(
-                windows::core::PCWSTR(pipe_name.as_ptr()),
+                windows::core::PCWSTR(pipe_name_wide.as_ptr()),
                 PIPE_ACCESS_DUPLEX,
                 PIPE_TYPE_MESSAGE | PIPE_WAIT,
                 PIPE_UNLIMITED_INSTANCES,

@@ -3,7 +3,401 @@
 use crate::error::MemoricError;
 use crate::safe_handle::SafeHandle;
 use crate::util::parse_address;
-use serde_json::Value;
+use serde_json::{json, Value};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrimitiveType {
+    U8,
+    U16,
+    U32,
+    U64,
+    I32,
+    F32,
+    F64,
+}
+
+impl PrimitiveType {
+    fn parse(value: &str) -> Result<Self, MemoricError> {
+        match value {
+            "u8" => Ok(Self::U8),
+            "u16" => Ok(Self::U16),
+            "u32" => Ok(Self::U32),
+            "u64" => Ok(Self::U64),
+            "i32" => Ok(Self::I32),
+            "f32" => Ok(Self::F32),
+            "f64" => Ok(Self::F64),
+            _ => Err(MemoricError::MemoryAccess(format!(
+                "Unsupported primitive type '{}'. Use u8/u16/u32/u64/i32/f32/f64.",
+                value
+            ))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::U8 => "u8",
+            Self::U16 => "u16",
+            Self::U32 => "u32",
+            Self::U64 => "u64",
+            Self::I32 => "i32",
+            Self::F32 => "f32",
+            Self::F64 => "f64",
+        }
+    }
+
+    fn size(self) -> usize {
+        match self {
+            Self::U8 => 1,
+            Self::U16 => 2,
+            Self::U32 | Self::I32 | Self::F32 => 4,
+            Self::U64 | Self::F64 => 8,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Endian {
+    Native,
+    Little,
+    Big,
+}
+
+impl Endian {
+    fn parse(value: Option<&str>) -> Result<Self, MemoricError> {
+        match value.unwrap_or("native") {
+            "native" => Ok(Self::Native),
+            "little" => Ok(Self::Little),
+            "big" => Ok(Self::Big),
+            other => Err(MemoricError::MemoryAccess(format!(
+                "Unsupported endian '{}'. Use native/little/big.",
+                other
+            ))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Little => "little",
+            Self::Big => "big",
+        }
+    }
+}
+
+fn requested_type(args: &Value) -> Result<PrimitiveType, MemoricError> {
+    let type_name = args
+        .get("type")
+        .or_else(|| args.get("value_type"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| MemoricError::MemoryAccess("Missing primitive type".to_string()))?;
+    PrimitiveType::parse(type_name)
+}
+
+fn requested_endian(args: &Value) -> Result<Endian, MemoricError> {
+    Endian::parse(args.get("endian").and_then(|value| value.as_str()))
+}
+
+fn alignment_json(address: u64, primitive: PrimitiveType, allow_unaligned: bool) -> Value {
+    let alignment = primitive.size() as u64;
+    let address_mod = if alignment <= 1 {
+        0
+    } else {
+        address % alignment
+    };
+    json!({
+        "required": alignment,
+        "address_mod": address_mod,
+        "aligned": address_mod == 0,
+        "allow_unaligned": allow_unaligned,
+    })
+}
+
+fn validate_alignment(
+    address: u64,
+    primitive: PrimitiveType,
+    allow_unaligned: bool,
+) -> Result<Value, MemoricError> {
+    let metadata = alignment_json(address, primitive, allow_unaligned);
+    if !allow_unaligned && !metadata["aligned"].as_bool().unwrap_or(false) {
+        return Err(MemoricError::MemoryAccess(format!(
+            "Address 0x{:016X} is not aligned to {} bytes for {}",
+            address,
+            primitive.size(),
+            primitive.as_str()
+        )));
+    }
+    Ok(metadata)
+}
+
+fn read_primitive_value(bytes: &[u8], primitive: PrimitiveType, endian: Endian) -> Value {
+    match primitive {
+        PrimitiveType::U8 => json!(bytes[0]),
+        PrimitiveType::U16 => {
+            let raw = [bytes[0], bytes[1]];
+            json!(match endian {
+                Endian::Native => u16::from_ne_bytes(raw),
+                Endian::Little => u16::from_le_bytes(raw),
+                Endian::Big => u16::from_be_bytes(raw),
+            })
+        }
+        PrimitiveType::U32 => {
+            let raw = [bytes[0], bytes[1], bytes[2], bytes[3]];
+            json!(match endian {
+                Endian::Native => u32::from_ne_bytes(raw),
+                Endian::Little => u32::from_le_bytes(raw),
+                Endian::Big => u32::from_be_bytes(raw),
+            })
+        }
+        PrimitiveType::U64 => {
+            let raw = [
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ];
+            json!(match endian {
+                Endian::Native => u64::from_ne_bytes(raw),
+                Endian::Little => u64::from_le_bytes(raw),
+                Endian::Big => u64::from_be_bytes(raw),
+            })
+        }
+        PrimitiveType::I32 => {
+            let raw = [bytes[0], bytes[1], bytes[2], bytes[3]];
+            json!(match endian {
+                Endian::Native => i32::from_ne_bytes(raw),
+                Endian::Little => i32::from_le_bytes(raw),
+                Endian::Big => i32::from_be_bytes(raw),
+            })
+        }
+        PrimitiveType::F32 => {
+            let raw = [bytes[0], bytes[1], bytes[2], bytes[3]];
+            let bits = match endian {
+                Endian::Native => u32::from_ne_bytes(raw),
+                Endian::Little => u32::from_le_bytes(raw),
+                Endian::Big => u32::from_be_bytes(raw),
+            };
+            json!(f32::from_bits(bits))
+        }
+        PrimitiveType::F64 => {
+            let raw = [
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ];
+            let bits = match endian {
+                Endian::Native => u64::from_ne_bytes(raw),
+                Endian::Little => u64::from_le_bytes(raw),
+                Endian::Big => u64::from_be_bytes(raw),
+            };
+            json!(f64::from_bits(bits))
+        }
+    }
+}
+
+fn serialize_primitive_value(
+    value: &Value,
+    primitive: PrimitiveType,
+    endian: Endian,
+) -> Result<Vec<u8>, MemoricError> {
+    match primitive {
+        PrimitiveType::U8 => {
+            let value = crate::args::parse_u64(value).ok_or_else(|| {
+                MemoricError::MemoryAccess("Expected integer value for u8".to_string())
+            })?;
+            if value > u8::MAX as u64 {
+                return Err(MemoricError::MemoryAccess(
+                    "u8 value exceeds 255".to_string(),
+                ));
+            }
+            Ok(vec![value as u8])
+        }
+        PrimitiveType::U16 => {
+            let value = crate::args::parse_u64(value).ok_or_else(|| {
+                MemoricError::MemoryAccess("Expected integer value for u16".to_string())
+            })?;
+            let value = u16::try_from(value)
+                .map_err(|_| MemoricError::MemoryAccess("u16 value exceeds 65535".to_string()))?;
+            Ok(match endian {
+                Endian::Native => value.to_ne_bytes().to_vec(),
+                Endian::Little => value.to_le_bytes().to_vec(),
+                Endian::Big => value.to_be_bytes().to_vec(),
+            })
+        }
+        PrimitiveType::U32 => {
+            let value = crate::args::parse_u64(value).ok_or_else(|| {
+                MemoricError::MemoryAccess("Expected integer value for u32".to_string())
+            })?;
+            let value = u32::try_from(value)
+                .map_err(|_| MemoricError::MemoryAccess("u32 value exceeds maximum".to_string()))?;
+            Ok(match endian {
+                Endian::Native => value.to_ne_bytes().to_vec(),
+                Endian::Little => value.to_le_bytes().to_vec(),
+                Endian::Big => value.to_be_bytes().to_vec(),
+            })
+        }
+        PrimitiveType::U64 => {
+            let value = crate::args::parse_u64(value).ok_or_else(|| {
+                MemoricError::MemoryAccess("Expected integer value for u64".to_string())
+            })?;
+            Ok(match endian {
+                Endian::Native => value.to_ne_bytes().to_vec(),
+                Endian::Little => value.to_le_bytes().to_vec(),
+                Endian::Big => value.to_be_bytes().to_vec(),
+            })
+        }
+        PrimitiveType::I32 => {
+            let value = value.as_i64().ok_or_else(|| {
+                MemoricError::MemoryAccess("Expected signed integer value for i32".to_string())
+            })?;
+            let value = i32::try_from(value)
+                .map_err(|_| MemoricError::MemoryAccess("i32 value out of range".to_string()))?;
+            Ok(match endian {
+                Endian::Native => value.to_ne_bytes().to_vec(),
+                Endian::Little => value.to_le_bytes().to_vec(),
+                Endian::Big => value.to_be_bytes().to_vec(),
+            })
+        }
+        PrimitiveType::F32 => {
+            let value = value.as_f64().ok_or_else(|| {
+                MemoricError::MemoryAccess("Expected numeric value for f32".to_string())
+            })? as f32;
+            let bits = value.to_bits();
+            Ok(match endian {
+                Endian::Native => bits.to_ne_bytes().to_vec(),
+                Endian::Little => bits.to_le_bytes().to_vec(),
+                Endian::Big => bits.to_be_bytes().to_vec(),
+            })
+        }
+        PrimitiveType::F64 => {
+            let value = value.as_f64().ok_or_else(|| {
+                MemoricError::MemoryAccess("Expected numeric value for f64".to_string())
+            })?;
+            let bits = value.to_bits();
+            Ok(match endian {
+                Endian::Native => bits.to_ne_bytes().to_vec(),
+                Endian::Little => bits.to_le_bytes().to_vec(),
+                Endian::Big => bits.to_be_bytes().to_vec(),
+            })
+        }
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{:02X}", byte))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Read one primitive numeric value with explicit endian and alignment metadata.
+pub fn typed_read(args: &Value) -> Result<Value, MemoricError> {
+    use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+    };
+
+    let pid = crate::args::require_pid(args, "pid").map_err(MemoricError::MemoryAccess)?;
+    let address =
+        crate::args::require_address(args, "address").map_err(MemoricError::MemoryAccess)?;
+    let primitive = requested_type(args)?;
+    let endian = requested_endian(args)?;
+    let allow_unaligned = args
+        .get("allow_unaligned")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    let alignment = validate_alignment(address, primitive, allow_unaligned)?;
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid)
+            .map_err(|e| MemoricError::WindowsApi(format!("OpenProcess failed: {}", e)))?;
+        let handle = SafeHandle::new(handle);
+
+        let mut buffer = vec![0u8; primitive.size()];
+        let mut bytes_read = 0usize;
+        ReadProcessMemory(
+            *handle,
+            address as *const _,
+            buffer.as_mut_ptr() as *mut _,
+            buffer.len(),
+            Some(&mut bytes_read as *mut _),
+        )
+        .map_err(|e| MemoricError::MemoryAccess(format!("ReadProcessMemory failed: {}", e)))?;
+
+        if bytes_read != primitive.size() {
+            return Err(MemoricError::MemoryAccess(format!(
+                "Partial typed read: expected {} bytes, read {}",
+                primitive.size(),
+                bytes_read
+            )));
+        }
+
+        Ok(json!({
+            "success": true,
+            "pid": pid,
+            "address": format!("0x{:016X}", address),
+            "type": primitive.as_str(),
+            "endian": endian.as_str(),
+            "size": primitive.size(),
+            "alignment": alignment,
+            "value": read_primitive_value(&buffer, primitive, endian),
+            "bytes": buffer,
+            "hex": hex_bytes(&buffer),
+        }))
+    }
+}
+
+/// Write one primitive numeric value with explicit endian and alignment metadata.
+pub fn typed_write(args: &Value) -> Result<Value, MemoricError> {
+    use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_WRITE,
+    };
+
+    let pid = crate::args::require_pid(args, "pid").map_err(MemoricError::MemoryAccess)?;
+    let address =
+        crate::args::require_address(args, "address").map_err(MemoricError::MemoryAccess)?;
+    let primitive = requested_type(args)?;
+    let endian = requested_endian(args)?;
+    let value = args
+        .get("value")
+        .ok_or_else(|| MemoricError::MemoryAccess("Missing value".to_string()))?;
+    let allow_unaligned = args
+        .get("allow_unaligned")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    let alignment = validate_alignment(address, primitive, allow_unaligned)?;
+    let bytes = serialize_primitive_value(value, primitive, endian)?;
+
+    unsafe {
+        let handle = OpenProcess(
+            PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION,
+            false,
+            pid,
+        )
+        .map_err(|e| MemoricError::WindowsApi(format!("OpenProcess failed: {}", e)))?;
+        let handle = SafeHandle::new(handle);
+
+        let mut bytes_written = 0usize;
+        WriteProcessMemory(
+            *handle,
+            address as *const _,
+            bytes.as_ptr() as *const _,
+            bytes.len(),
+            Some(&mut bytes_written as *mut _),
+        )
+        .map_err(|e| MemoricError::MemoryAccess(format!("WriteProcessMemory failed: {}", e)))?;
+
+        Ok(json!({
+            "success": true,
+            "pid": pid,
+            "address": format!("0x{:016X}", address),
+            "type": primitive.as_str(),
+            "endian": endian.as_str(),
+            "size": primitive.size(),
+            "alignment": alignment,
+            "value": value.clone(),
+            "bytes_written": bytes_written,
+            "bytes": bytes,
+            "hex": hex_bytes(&bytes),
+        }))
+    }
+}
 
 /// Read memory as a named struct layout.
 /// Fields define {name, offset, type} where type is u8/u16/u32/u64/i32/f32/f64/ptr/string:N/bytes:N
@@ -497,5 +891,195 @@ fn serialize_field_value(value: &Value, ftype: &str) -> Result<Vec<u8>, MemoricE
             "Unknown field type: {}",
             ftype
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[repr(align(8))]
+    struct AlignedBytes([u8; 64]);
+
+    #[test]
+    fn typed_read_write_cover_primitive_endian_and_alignment_metadata() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let mut buffer = AlignedBytes([0u8; 64]);
+        let base = buffer.0.as_mut_ptr() as u64;
+        let pid = std::process::id();
+        assert_eq!(base % 8, 0, "test buffer should be 8-byte aligned");
+
+        typed_write(&json!({
+            "pid": pid,
+            "address": base,
+            "type": "u8",
+            "value": 0xAB
+        }))
+        .expect("u8 write");
+        assert_eq!(buffer.0[0], 0xAB);
+        let read_u8 = typed_read(&json!({
+            "pid": pid,
+            "address": base,
+            "type": "u8"
+        }))
+        .expect("u8 read");
+        assert_eq!(read_u8["value"], json!(0xAB));
+        assert_eq!(read_u8["alignment"]["aligned"], true);
+
+        typed_write(&json!({
+            "pid": pid,
+            "address": base + 2,
+            "type": "u16",
+            "endian": "little",
+            "value": 0x1234
+        }))
+        .expect("u16 little write");
+        assert_eq!(&buffer.0[2..4], &[0x34, 0x12]);
+        let read_u16 = typed_read(&json!({
+            "pid": pid,
+            "address": base + 2,
+            "type": "u16",
+            "endian": "little"
+        }))
+        .expect("u16 little read");
+        assert_eq!(read_u16["value"], json!(0x1234));
+
+        typed_write(&json!({
+            "pid": pid,
+            "address": base + 4,
+            "type": "u32",
+            "endian": "big",
+            "value": 0x11223344u64
+        }))
+        .expect("u32 big write");
+        assert_eq!(&buffer.0[4..8], &[0x11, 0x22, 0x33, 0x44]);
+        let read_u32 = typed_read(&json!({
+            "pid": pid,
+            "address": base + 4,
+            "type": "u32",
+            "endian": "big"
+        }))
+        .expect("u32 big read");
+        assert_eq!(read_u32["value"], json!(0x11223344u64));
+
+        let u64_value = 0x0102_0304_0506_0708u64;
+        typed_write(&json!({
+            "pid": pid,
+            "address": base + 8,
+            "type": "u64",
+            "endian": "little",
+            "value": u64_value
+        }))
+        .expect("u64 little write");
+        assert_eq!(
+            &buffer.0[8..16],
+            &[0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
+        );
+        let read_u64 = typed_read(&json!({
+            "pid": pid,
+            "address": base + 8,
+            "type": "u64",
+            "endian": "little"
+        }))
+        .expect("u64 little read");
+        assert_eq!(read_u64["value"], json!(u64_value));
+
+        typed_write(&json!({
+            "pid": pid,
+            "address": base + 16,
+            "type": "i32",
+            "endian": "big",
+            "value": -123456
+        }))
+        .expect("i32 big write");
+        let read_i32 = typed_read(&json!({
+            "pid": pid,
+            "address": base + 16,
+            "type": "i32",
+            "endian": "big"
+        }))
+        .expect("i32 big read");
+        assert_eq!(read_i32["value"], json!(-123456));
+
+        typed_write(&json!({
+            "pid": pid,
+            "address": base + 20,
+            "type": "f32",
+            "endian": "little",
+            "value": 3.5
+        }))
+        .expect("f32 little write");
+        let read_f32 = typed_read(&json!({
+            "pid": pid,
+            "address": base + 20,
+            "type": "f32",
+            "endian": "little"
+        }))
+        .expect("f32 little read");
+        assert!((read_f32["value"].as_f64().unwrap() - 3.5).abs() < f64::EPSILON);
+
+        typed_write(&json!({
+            "pid": pid,
+            "address": base + 24,
+            "type": "f64",
+            "endian": "big",
+            "value": -42.25
+        }))
+        .expect("f64 big write");
+        let read_f64 = typed_read(&json!({
+            "pid": pid,
+            "address": base + 24,
+            "type": "f64",
+            "endian": "big"
+        }))
+        .expect("f64 big read");
+        assert!((read_f64["value"].as_f64().unwrap() + 42.25).abs() < f64::EPSILON);
+
+        let unaligned = typed_read(&json!({
+            "pid": pid,
+            "address": base + 1,
+            "type": "u32",
+            "allow_unaligned": true
+        }))
+        .expect("unaligned read is allowed by default");
+        assert_eq!(unaligned["alignment"]["aligned"], false);
+        assert_eq!(unaligned["alignment"]["address_mod"], json!(1));
+
+        let err = typed_read(&json!({
+            "pid": pid,
+            "address": base + 1,
+            "type": "u32",
+            "allow_unaligned": false
+        }))
+        .expect_err("strict alignment should reject unaligned address");
+        assert!(err.to_string().contains("not aligned"));
+    }
+
+    #[test]
+    fn typed_write_validates_ranges_and_required_fields() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let mut buffer = AlignedBytes([0u8; 64]);
+        let base = buffer.0.as_mut_ptr() as u64;
+
+        let err = typed_write(&json!({
+            "pid": std::process::id(),
+            "address": base,
+            "type": "u8",
+            "value": 256
+        }))
+        .expect_err("u8 range should be enforced");
+        assert!(err.to_string().contains("u8 value exceeds 255"));
+
+        let err = typed_read(&json!({
+            "pid": std::process::id(),
+            "address": base,
+            "type": "u128"
+        }))
+        .expect_err("unsupported type should fail");
+        assert!(err.to_string().contains("Unsupported primitive type"));
     }
 }

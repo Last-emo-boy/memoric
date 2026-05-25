@@ -232,7 +232,9 @@ pub fn read_string(args: &Value) -> Result<Value, MemoricError> {
 /// Write string to memory
 pub fn write_string(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_VM_OPERATION, PROCESS_VM_WRITE};
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
+    };
 
     let pid = args
         .get("pid")
@@ -255,11 +257,17 @@ pub fn write_string(args: &Value) -> Result<Value, MemoricError> {
     );
 
     unsafe {
-        let handle = OpenProcess(PROCESS_VM_WRITE | PROCESS_VM_OPERATION, false, pid as u32)
-            .map_err(|e| MemoricError::WindowsApi(format!("Failed to open process: {}", e)))?;
+        let handle = OpenProcess(
+            PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_VM_READ,
+            false,
+            pid as u32,
+        )
+        .map_err(|e| MemoricError::WindowsApi(format!("Failed to open process: {}", e)))?;
         let handle = SafeHandle::new(handle);
 
         let bytes = text.as_bytes();
+        let original =
+            crate::memory::rollback::capture_original_bytes(*handle, address, bytes.len() + 1);
         let mut bytes_written = 0usize;
 
         WriteProcessMemory(
@@ -287,7 +295,55 @@ pub fn write_string(args: &Value) -> Result<Value, MemoricError> {
             "address": format!("0x{:016X}", address),
             "bytes_written": bytes_written,
             "text": text,
-            "success": true
+            "success": true,
+            "rollback": crate::memory::rollback::restore_original_string_bytes_rollback(
+                pid,
+                address,
+                &original,
+                false,
+            )
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn write_string_captures_original_null_terminated_bytes_for_rollback() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let mut buffer = b"old\0tail".to_vec();
+        let address = buffer.as_mut_ptr() as u64;
+
+        let result = write_string(&json!({
+            "pid": std::process::id(),
+            "address": address,
+            "text": "new"
+        }))
+        .expect("write_string should update current process buffer");
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["bytes_written"], 3);
+        assert_eq!(&buffer[..4], b"new\0");
+        assert_eq!(result["rollback"]["available"], true);
+        assert_eq!(
+            result["rollback"]["strategy"],
+            "restore_original_string_bytes"
+        );
+        assert_eq!(
+            result["rollback"]["original_bytes"],
+            json!([111, 108, 100, 0])
+        );
+        assert_eq!(result["rollback"]["action"]["tool"], "memory");
+        assert_eq!(result["rollback"]["action"]["action"], "write");
+        assert_eq!(
+            result["rollback"]["action"]["source_action"],
+            "target.string_write"
+        );
     }
 }

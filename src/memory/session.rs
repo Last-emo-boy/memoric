@@ -12,8 +12,50 @@
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const DEFAULT_SCAN_RESULT_PAGE_LIMIT: usize = 50;
+pub const MAX_SCAN_RESULT_PAGE_LIMIT: usize = 500;
+pub const MAX_SCAN_RESULT_OFFSET: usize = crate::args::DEFAULT_MAX_LIMIT;
+const AUTO_SCAN_RESULT_ARTIFACT_THRESHOLD: usize = 1_000;
+const SCAN_RESULT_CURSOR_PREFIX: &str = "scan-result-cursor:";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanResultSort {
+    IndexAsc,
+    IndexDesc,
+    AddressAsc,
+    AddressDesc,
+    ValueAsc,
+    ValueDesc,
+}
+
+impl ScanResultSort {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::IndexAsc => "index_asc",
+            Self::IndexDesc => "index_desc",
+            Self::AddressAsc => "address_asc",
+            Self::AddressDesc => "address_desc",
+            Self::ValueAsc => "value_asc",
+            Self::ValueDesc => "value_desc",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "index" | "index_asc" => Some(Self::IndexAsc),
+            "index_desc" => Some(Self::IndexDesc),
+            "address" | "address_asc" => Some(Self::AddressAsc),
+            "address_desc" => Some(Self::AddressDesc),
+            "value" | "value_asc" => Some(Self::ValueAsc),
+            "value_desc" => Some(Self::ValueDesc),
+            _ => None,
+        }
+    }
+}
 
 /// Global scan session store
 static SESSIONS: Lazy<Mutex<ScanSessionStore>> = Lazy::new(|| Mutex::new(ScanSessionStore::new()));
@@ -34,6 +76,20 @@ pub enum ScanValueType {
 }
 
 impl ScanValueType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::U8 => "u8",
+            Self::U16 => "u16",
+            Self::U32 => "u32",
+            Self::U64 => "u64",
+            Self::I32 => "i32",
+            Self::I64 => "i64",
+            Self::F32 => "f32",
+            Self::F64 => "f64",
+            Self::Bytes => "bytes",
+        }
+    }
+
     pub fn size(&self) -> usize {
         match self {
             Self::U8 => 1,
@@ -153,53 +209,6 @@ fn read_process_memory_bytes(pid: u32, address: u64, size: usize) -> Result<Vec<
     }
 }
 
-/// Get all readable memory regions of a process
-fn get_scannable_regions(pid: u32) -> Result<Vec<(u64, usize)>, String> {
-    use windows::Win32::System::Memory::{
-        VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_GUARD, PAGE_NOACCESS,
-    };
-    use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
-    };
-
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid)
-            .map_err(|e| format!("OpenProcess: {}", e))?;
-        let _guard = crate::safe_handle::SafeHandle::new(handle);
-
-        let mut regions = Vec::new();
-        let mut address: usize = 0;
-        let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
-
-        loop {
-            let ret = VirtualQueryEx(
-                handle,
-                Some(address as *const _),
-                &mut mbi,
-                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
-            );
-            if ret == 0 {
-                break;
-            }
-
-            if mbi.State == MEM_COMMIT
-                && mbi.Protect.0 & PAGE_GUARD.0 == 0
-                && mbi.Protect.0 & PAGE_NOACCESS.0 == 0
-                && mbi.RegionSize > 0
-            {
-                regions.push((mbi.BaseAddress as u64, mbi.RegionSize));
-            }
-
-            address = mbi.BaseAddress as usize + mbi.RegionSize;
-            if address == 0 {
-                break; // overflow — reached end of address space
-            }
-        }
-
-        Ok(regions)
-    }
-}
-
 /// Compare two byte slices as numeric values
 fn compare_numeric(old: &[u8], new: &[u8], filter: &NarrowFilter) -> bool {
     if old.len() != new.len() {
@@ -263,6 +272,7 @@ fn compare_numeric(old: &[u8], new: &[u8], filter: &NarrowFilter) -> bool {
 
 /// Create a new scan session and perform initial scan
 pub fn scan_new(args: &Value) -> Result<Value, String> {
+    let runtime = crate::runtime::RuntimeContext::from_args(args)?;
     let pid = args
         .get("pid")
         .and_then(|v| v.as_u64())
@@ -315,26 +325,59 @@ pub fn scan_new(args: &Value) -> Result<Value, String> {
         value_type_str,
         target_bytes.len()
     );
+    runtime.mark_running(
+        None,
+        format!("scan_new: locating scannable regions for pid {}", pid),
+    );
 
-    // Get all scannable regions
-    let regions = get_scannable_regions(pid)?;
+    // Get all scannable regions. This uses a metadata-only cache; raw memory
+    // bytes are still read live for every scan.
+    let region_query = crate::memory::region_cache::get_scannable_regions(pid, args)?;
+    let region_cache_report = region_query.report.clone();
+    let regions = region_query
+        .regions
+        .iter()
+        .map(|region| region.as_scan_range())
+        .collect::<Vec<_>>();
     tracing::info!("[SCAN] {} scannable regions found", regions.len());
+    let total_regions = regions.len() as u64;
+    runtime.mark_running(
+        Some(total_regions),
+        format!("scan_new: scanning {} regions", total_regions),
+    );
 
     let mut results: Vec<ScanEntry> = Vec::new();
     let mut regions_scanned = 0u32;
     let mut bytes_scanned = 0u64;
 
-    for (base, size) in &regions {
+    for (idx, (base, size)) in regions.iter().enumerate() {
+        runtime.check()?;
+        let current_region = idx as u64 + 1;
         match read_process_memory_bytes(pid, *base, *size) {
             Ok(data) => {
                 regions_scanned += 1;
                 bytes_scanned += data.len() as u64;
                 if data.len() < value_size {
+                    if current_region == total_regions || current_region % 16 == 0 {
+                        runtime.update_progress(
+                            current_region,
+                            Some(total_regions),
+                            format!(
+                                "scan_new: scanned {}/{} regions, {} matches",
+                                current_region,
+                                total_regions,
+                                results.len()
+                            ),
+                        );
+                    }
                     continue;
                 }
 
                 // Scan for exact match
                 for offset in 0..=(data.len() - value_size) {
+                    if offset % 4096 == 0 {
+                        runtime.check()?;
+                    }
                     let window = &data[offset..offset + value_size];
                     let matched = if let Some(pattern) = &byte_pattern {
                         pattern_matches(window, pattern)
@@ -350,9 +393,44 @@ pub fn scan_new(args: &Value) -> Result<Value, String> {
                     }
                 }
             }
-            Err(_) => continue, // skip unreadable regions
+            Err(_) => {
+                if current_region == total_regions || current_region % 16 == 0 {
+                    runtime.update_progress(
+                        current_region,
+                        Some(total_regions),
+                        format!(
+                            "scan_new: scanned {}/{} regions, {} matches",
+                            current_region,
+                            total_regions,
+                            results.len()
+                        ),
+                    );
+                }
+                continue; // skip unreadable regions
+            }
+        }
+        if current_region == total_regions || current_region % 16 == 0 {
+            runtime.update_progress(
+                current_region,
+                Some(total_regions),
+                format!(
+                    "scan_new: scanned {}/{} regions, {} matches",
+                    current_region,
+                    total_regions,
+                    results.len()
+                ),
+            );
         }
     }
+    runtime.update_progress(
+        total_regions,
+        Some(total_regions),
+        format!(
+            "scan_new: complete, {} readable regions, {} matches",
+            regions_scanned,
+            results.len()
+        ),
+    );
 
     // Create session
     let mut store = SESSIONS.lock().map_err(|e| e.to_string())?;
@@ -380,6 +458,7 @@ pub fn scan_new(args: &Value) -> Result<Value, String> {
         "value_type": value_type_str,
         "results_found": result_count,
         "regions_scanned": regions_scanned,
+        "region_cache": region_cache_report.to_json(),
         "bytes_scanned": bytes_scanned,
         "message": format!("Session '{}' created. {} matches found. Use scan_next to narrow.", session_id, result_count),
         "hint": if result_count > 1000 {
@@ -394,6 +473,7 @@ pub fn scan_new(args: &Value) -> Result<Value, String> {
 
 /// Narrow an existing scan session
 pub fn scan_next(args: &Value) -> Result<Value, String> {
+    let runtime = crate::runtime::RuntimeContext::from_args(args)?;
     let session_id = args
         .get("session_id")
         .and_then(|v| v.as_str())
@@ -451,15 +531,31 @@ pub fn scan_next(args: &Value) -> Result<Value, String> {
         return Err("Byte scan sessions support filters changed/unchanged/exact only".to_string());
     }
     let before_count = session.results.len();
+    let mut changed_count = 0usize;
+    let mut unchanged_count = 0usize;
+    let mut unreadable_count = 0usize;
+    runtime.mark_running(
+        Some(before_count as u64),
+        format!(
+            "scan_next: applying '{}' filter to {} candidates",
+            filter_str, before_count
+        ),
+    );
 
     // Save current state for undo
     session.history.push(session.results.clone());
 
     // Re-read current values and filter
     let mut new_results: Vec<ScanEntry> = Vec::new();
-    for entry in &session.results {
+    for (idx, entry) in session.results.iter().enumerate() {
+        runtime.check()?;
         match read_process_memory_bytes(session.pid, entry.address, value_size) {
             Ok(current) if current.len() == value_size => {
+                if current == entry.value {
+                    unchanged_count += 1;
+                } else {
+                    changed_count += 1;
+                }
                 if compare_numeric(&entry.value, &current, &filter) {
                     new_results.push(ScanEntry {
                         address: entry.address,
@@ -467,11 +563,48 @@ pub fn scan_next(args: &Value) -> Result<Value, String> {
                     });
                 }
             }
-            _ => continue, // address became unreadable — discard
+            _ => {
+                unreadable_count += 1;
+                continue; // address became unreadable — discard
+            }
+        }
+        let current_candidate = idx as u64 + 1;
+        if current_candidate == before_count as u64 || current_candidate % 128 == 0 {
+            runtime.update_progress(
+                current_candidate,
+                Some(before_count as u64),
+                format!(
+                    "scan_next: filtered {}/{} candidates, {} remain",
+                    current_candidate,
+                    before_count,
+                    new_results.len()
+                ),
+            );
         }
     }
 
     let after_count = new_results.len();
+    let delta = build_scan_delta_summary(
+        before_count,
+        after_count,
+        changed_count,
+        unchanged_count,
+        unreadable_count,
+    );
+    let removed_count = delta["removed"].as_u64().unwrap_or_default() as usize;
+    runtime.update_progress(
+        before_count as u64,
+        Some(before_count as u64),
+        format!(
+            "scan_next: complete, {} -> {} candidates ({} removed, {} changed, {} unchanged, {} unreadable)",
+            before_count,
+            after_count,
+            removed_count,
+            changed_count,
+            unchanged_count,
+            unreadable_count
+        ),
+    );
     session.results = new_results;
     session.last_scan_at = now_epoch();
     session.scan_count += 1;
@@ -496,15 +629,44 @@ pub fn scan_next(args: &Value) -> Result<Value, String> {
         "before": before_count,
         "after": after_count,
         "eliminated": before_count - after_count,
+        "delta": delta,
         "scan_count": session.scan_count,
         "preview": preview,
-        "message": format!("{} → {} results ({} eliminated). {}",
-            before_count, after_count, before_count - after_count,
+        "message": format!(
+            "{} → {} results ({} eliminated, {} changed, {} unchanged, {} unreadable). {}",
+            before_count,
+            after_count,
+            before_count - after_count,
+            changed_count,
+            unchanged_count,
+            unreadable_count,
             if after_count <= 5 { "Likely found the target!" }
             else if after_count == 0 { "All eliminated — try scan_undo" }
             else { "Continue narrowing with scan_next" }
         )
     }))
+}
+
+fn build_scan_delta_summary(
+    before_count: usize,
+    after_count: usize,
+    changed_count: usize,
+    unchanged_count: usize,
+    unreadable_count: usize,
+) -> Value {
+    let readable_count = changed_count.saturating_add(unchanged_count);
+    let removed_count = before_count.saturating_sub(after_count);
+    json!({
+        "before": before_count,
+        "after": after_count,
+        "added": after_count.saturating_sub(before_count),
+        "removed": removed_count,
+        "changed": changed_count,
+        "unchanged": unchanged_count,
+        "unreadable": unreadable_count,
+        "readable": readable_count,
+        "retained": after_count,
+    })
 }
 
 /// Undo the last narrowing step
@@ -535,9 +697,21 @@ pub fn scan_undo(args: &Value) -> Result<Value, String> {
     }
 }
 
-/// List active scan sessions
-pub fn scan_list(_args: &Value) -> Result<Value, String> {
+/// List active scan sessions, or page candidates for one session when session_id is supplied.
+pub fn scan_list(args: &Value) -> Result<Value, String> {
     let store = SESSIONS.lock().map_err(|e| e.to_string())?;
+    if args.get("session_id").is_some() {
+        let session_id = args
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .ok_or("scan_list session_id must be a string")?;
+        let session = store
+            .sessions
+            .get(session_id)
+            .ok_or_else(|| format!("Session '{}' not found", session_id))?;
+        return scan_result_page(session, args);
+    }
+
     let sessions: Vec<Value> = store
         .sessions
         .values()
@@ -559,6 +733,305 @@ pub fn scan_list(_args: &Value) -> Result<Value, String> {
         "sessions": sessions,
         "total": sessions.len(),
     }))
+}
+
+fn scan_result_page(session: &ScanSession, args: &Value) -> Result<Value, String> {
+    let limit = parse_scan_result_limit(args)?;
+    let sort = parse_scan_result_sort(args)?;
+    let summary_only = parse_bool_arg(args, "summary_only")?;
+    let (start, cursor_mode) = if let Some(cursor) = args.get("cursor") {
+        let cursor = cursor
+            .as_str()
+            .ok_or_else(|| "Invalid cursor: expected opaque string token".to_string())?;
+        (
+            decode_scan_result_cursor(cursor, &session.id, session.scan_count, sort)?,
+            true,
+        )
+    } else {
+        let offset = crate::args::parse_limit(args, "offset", 0, MAX_SCAN_RESULT_OFFSET)?;
+        (offset, false)
+    };
+
+    if start > session.results.len() {
+        return Err("Invalid cursor: pagination position is outside scan result list".to_string());
+    }
+
+    let total = session.results.len();
+    let candidates = if summary_only {
+        Vec::new()
+    } else {
+        sorted_scan_entries(session, sort)
+            .into_iter()
+            .skip(start)
+            .take(limit)
+            .map(|(idx, entry)| scan_entry_to_json(idx, entry, &session.value_type))
+            .collect::<Vec<_>>()
+    };
+    let next_offset = start.saturating_add(limit);
+    let mut response = json!({
+        "session_id": session.id,
+        "pid": session.pid,
+        "value_type": session.value_type.as_str(),
+        "value_size": session.value_size,
+        "scan_count": session.scan_count,
+        "total": total,
+        "offset": start,
+        "limit": limit,
+        "sort": sort.as_str(),
+        "summary_only": summary_only,
+        "count": candidates.len(),
+        "candidates": candidates,
+        "snapshot": {
+            "cursorKind": "scan-results",
+            "sessionId": session.id,
+            "scanCount": session.scan_count,
+            "sort": sort.as_str(),
+            "total": total
+        }
+    });
+    if !summary_only && next_offset < total {
+        response["nextCursor"] = json!(encode_scan_result_cursor(
+            &session.id,
+            session.scan_count,
+            sort,
+            next_offset
+        ));
+    }
+    if cursor_mode {
+        response["cursor"] = args.get("cursor").cloned().unwrap_or(Value::Null);
+    }
+    if let Some(artifact) = export_scan_results_artifact(session, args, sort, summary_only)? {
+        response["artifact"] = artifact.clone();
+        response["output_path"] = json!(artifact["path"].as_str().unwrap_or_default());
+        response["exported_count"] = json!(total);
+        response["redaction_status"] = json!("artifact");
+        response["export_reason"] = json!(if output_path_from_args(args).is_some() {
+            "explicit_output_path"
+        } else {
+            "large_session_auto"
+        });
+    }
+    Ok(response)
+}
+
+fn export_scan_results_artifact(
+    session: &ScanSession,
+    args: &Value,
+    sort: ScanResultSort,
+    summary_only: bool,
+) -> Result<Option<Value>, String> {
+    let explicit_path = output_path_from_args(args);
+    let should_export = explicit_path.is_some()
+        || (!summary_only && session.results.len() > AUTO_SCAN_RESULT_ARTIFACT_THRESHOLD);
+    if !should_export {
+        return Ok(None);
+    };
+    let candidates = sorted_scan_entries(session, sort)
+        .into_iter()
+        .map(|(idx, entry)| scan_entry_to_json(idx, entry, &session.value_type))
+        .collect::<Vec<_>>();
+    let payload = json!({
+        "kind": "scan-results",
+        "session_id": session.id,
+        "pid": session.pid,
+        "value_type": session.value_type.as_str(),
+        "value_size": session.value_size,
+        "scan_count": session.scan_count,
+        "sort": sort.as_str(),
+        "total": candidates.len(),
+        "candidates": candidates,
+        "snapshot": {
+            "cursorKind": "scan-results",
+            "sessionId": session.id,
+            "scanCount": session.scan_count,
+            "sort": sort.as_str(),
+            "total": candidates.len()
+        },
+        "redaction_status": "artifact"
+    });
+    let bytes = serde_json::to_vec_pretty(&payload)
+        .map_err(|err| format!("serialize scan result artifact: {}", err))?;
+    let path = explicit_path.unwrap_or_else(|| auto_scan_results_output_path(session, &bytes));
+    let correlation_id = crate::observability::correlation_id_from_args(args);
+    crate::artifact::write_artifact_bytes(
+        &path,
+        &bytes,
+        crate::artifact::retention_secs_from_args(args),
+        correlation_id.as_deref(),
+    )
+    .map(Some)
+}
+
+fn auto_scan_results_output_path(session: &ScanSession, bytes: &[u8]) -> PathBuf {
+    let safe_session_id = session
+        .id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let hash = crate::artifact::sha256_bytes(bytes);
+    std::env::temp_dir().join(format!(
+        "memoric-scan-results-{}-{}-{}.json",
+        safe_session_id, session.scan_count, hash
+    ))
+}
+
+fn output_path_from_args(args: &Value) -> Option<PathBuf> {
+    args.get("output_path")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+fn parse_scan_result_limit(args: &Value) -> Result<usize, String> {
+    let limit = crate::args::parse_limit(
+        args,
+        "limit",
+        DEFAULT_SCAN_RESULT_PAGE_LIMIT,
+        MAX_SCAN_RESULT_PAGE_LIMIT,
+    )?;
+    if limit == 0 {
+        return Err("'limit' must be greater than 0".to_string());
+    }
+    Ok(limit)
+}
+
+fn parse_scan_result_sort(args: &Value) -> Result<ScanResultSort, String> {
+    match args.get("sort") {
+        Some(Value::String(value)) => ScanResultSort::from_str(value).ok_or_else(|| {
+            "Invalid 'sort'; expected index_asc, index_desc, address_asc, address_desc, value_asc, or value_desc".to_string()
+        }),
+        Some(_) => Err("Invalid 'sort'; expected a string".to_string()),
+        None => Ok(ScanResultSort::IndexAsc),
+    }
+}
+
+fn parse_bool_arg(args: &Value, key: &str) -> Result<bool, String> {
+    match args.get(key) {
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(Value::String(value)) => match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => Ok(true),
+            "false" | "0" | "no" | "off" => Ok(false),
+            _ => Err(format!("Invalid '{}'; expected boolean", key)),
+        },
+        Some(_) => Err(format!("Invalid '{}'; expected boolean", key)),
+        None => Ok(false),
+    }
+}
+
+fn sorted_scan_entries(session: &ScanSession, sort: ScanResultSort) -> Vec<(usize, &ScanEntry)> {
+    let mut entries = session.results.iter().enumerate().collect::<Vec<_>>();
+    match sort {
+        ScanResultSort::IndexAsc => {}
+        ScanResultSort::IndexDesc => entries.reverse(),
+        ScanResultSort::AddressAsc => entries.sort_by(|(left_idx, left), (right_idx, right)| {
+            left.address
+                .cmp(&right.address)
+                .then_with(|| left_idx.cmp(right_idx))
+        }),
+        ScanResultSort::AddressDesc => entries.sort_by(|(left_idx, left), (right_idx, right)| {
+            right
+                .address
+                .cmp(&left.address)
+                .then_with(|| left_idx.cmp(right_idx))
+        }),
+        ScanResultSort::ValueAsc => entries.sort_by(|(left_idx, left), (right_idx, right)| {
+            left.value
+                .cmp(&right.value)
+                .then_with(|| left_idx.cmp(right_idx))
+        }),
+        ScanResultSort::ValueDesc => entries.sort_by(|(left_idx, left), (right_idx, right)| {
+            right
+                .value
+                .cmp(&left.value)
+                .then_with(|| left_idx.cmp(right_idx))
+        }),
+    }
+    entries
+}
+
+fn scan_entry_to_json(index: usize, entry: &ScanEntry, value_type: &ScanValueType) -> Value {
+    json!({
+        "index": index,
+        "address": format!("0x{:016X}", entry.address),
+        "value": format_value_bytes(&entry.value, value_type),
+        "hex": hex::encode(&entry.value),
+    })
+}
+
+fn encode_scan_result_cursor(
+    session_id: &str,
+    scan_count: u32,
+    sort: ScanResultSort,
+    offset: usize,
+) -> String {
+    format!(
+        "{}{}:{}:{}:{}",
+        SCAN_RESULT_CURSOR_PREFIX,
+        session_id,
+        scan_count,
+        sort.as_str(),
+        offset
+    )
+}
+
+fn decode_scan_result_cursor(
+    cursor: &str,
+    expected_session_id: &str,
+    expected_scan_count: u32,
+    expected_sort: ScanResultSort,
+) -> Result<usize, String> {
+    let raw = cursor
+        .strip_prefix(SCAN_RESULT_CURSOR_PREFIX)
+        .ok_or_else(|| "Invalid cursor: unrecognized opaque token".to_string())?;
+    let mut parts = raw.split(':');
+    let session_id = parts
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "Invalid cursor: missing session snapshot".to_string())?;
+    let scan_count = parts
+        .next()
+        .ok_or_else(|| "Invalid cursor: missing scan count".to_string())?
+        .parse::<u32>()
+        .map_err(|_| "Invalid cursor: malformed scan count".to_string())?;
+    let third = parts
+        .next()
+        .ok_or_else(|| "Invalid cursor: missing pagination position".to_string())?;
+    let (sort, offset) = match parts.next() {
+        Some(offset) => {
+            let sort = ScanResultSort::from_str(third)
+                .ok_or_else(|| "Invalid cursor: malformed sort mode".to_string())?;
+            let offset = offset
+                .parse::<usize>()
+                .map_err(|_| "Invalid cursor: malformed pagination position".to_string())?;
+            (sort, offset)
+        }
+        None => {
+            let offset = third
+                .parse::<usize>()
+                .map_err(|_| "Invalid cursor: malformed pagination position".to_string())?;
+            (ScanResultSort::IndexAsc, offset)
+        }
+    };
+    if parts.next().is_some() {
+        return Err("Invalid cursor: malformed opaque token".to_string());
+    }
+    if session_id != expected_session_id {
+        return Err("Invalid cursor: session mismatch".to_string());
+    }
+    if scan_count != expected_scan_count {
+        return Err("Invalid cursor: scan snapshot changed".to_string());
+    }
+    if sort != expected_sort {
+        return Err("Invalid cursor: sort mode mismatch".to_string());
+    }
+    Ok(offset)
 }
 
 /// Reset/delete a scan session
@@ -785,5 +1258,338 @@ fn format_value_bytes(bytes: &[u8], vt: &ScanValueType) -> Value {
         ScanValueType::F32 => json!(f32::from_le_bytes(bytes.try_into().unwrap_or_default())),
         ScanValueType::F64 => json!(f64::from_le_bytes(bytes.try_into().unwrap_or_default())),
         ScanValueType::Bytes => json!(hex::encode(bytes)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_scan_delta_summary, scan_list, ScanEntry, ScanSession, ScanValueType,
+        SCAN_RESULT_CURSOR_PREFIX, SESSIONS,
+    };
+    use serde_json::json;
+
+    fn insert_scan_session(session_id: &str, scan_count: u32) {
+        insert_scan_session_with_results(
+            session_id,
+            scan_count,
+            vec![
+                ScanEntry {
+                    address: 0x1000,
+                    value: 1u32.to_le_bytes().to_vec(),
+                },
+                ScanEntry {
+                    address: 0x2000,
+                    value: 2u32.to_le_bytes().to_vec(),
+                },
+                ScanEntry {
+                    address: 0x3000,
+                    value: 3u32.to_le_bytes().to_vec(),
+                },
+            ],
+        );
+    }
+
+    fn insert_scan_session_with_results(
+        session_id: &str,
+        scan_count: u32,
+        results: Vec<ScanEntry>,
+    ) {
+        let mut store = SESSIONS.lock().expect("scan session store");
+        store.sessions.insert(
+            session_id.to_string(),
+            ScanSession {
+                id: session_id.to_string(),
+                pid: 1234,
+                value_type: ScanValueType::U32,
+                value_size: 4,
+                results,
+                history: Vec::new(),
+                created_at: 1,
+                last_scan_at: 2,
+                scan_count,
+            },
+        );
+    }
+
+    fn remove_scan_session(session_id: &str) {
+        let mut store = SESSIONS.lock().expect("scan session store");
+        store.sessions.remove(session_id);
+    }
+
+    #[test]
+    fn scan_list_pages_session_candidates_with_opaque_cursor() {
+        let session_id = "scan_test_pagination";
+        insert_scan_session(session_id, 1);
+
+        let first = scan_list(&json!({
+            "session_id": session_id,
+            "limit": 2
+        }))
+        .expect("first page");
+        assert_eq!(first["session_id"], session_id);
+        assert_eq!(first["count"], 2);
+        assert_eq!(first["total"], 3);
+        assert_eq!(first["candidates"].as_array().unwrap().len(), 2);
+        let cursor = first["nextCursor"]
+            .as_str()
+            .expect("next cursor")
+            .to_string();
+        assert!(cursor.starts_with(SCAN_RESULT_CURSOR_PREFIX));
+
+        let second = scan_list(&json!({
+            "session_id": session_id,
+            "cursor": cursor
+        }))
+        .expect("second page");
+        assert_eq!(second["count"], 1);
+        assert_eq!(second["offset"], 2);
+        assert_eq!(second["candidates"][0]["index"], 2);
+        assert_eq!(second["candidates"][0]["value"], 3);
+        assert!(second.get("nextCursor").is_none());
+
+        remove_scan_session(session_id);
+    }
+
+    #[test]
+    fn scan_list_rejects_invalid_or_stale_result_cursors() {
+        let session_id = "scan_test_invalid_cursor";
+        insert_scan_session(session_id, 1);
+
+        let err = scan_list(&json!({
+            "session_id": session_id,
+            "cursor": "not-a-scan-cursor"
+        }))
+        .expect_err("invalid prefix should fail");
+        assert!(err.contains("Invalid cursor"));
+
+        let first = scan_list(&json!({
+            "session_id": session_id,
+            "limit": 2
+        }))
+        .expect("first page");
+        let cursor = first["nextCursor"].as_str().unwrap().to_string();
+        {
+            let mut store = SESSIONS.lock().expect("scan session store");
+            let session = store.sessions.get_mut(session_id).expect("session");
+            session.scan_count += 1;
+        }
+
+        let err = scan_list(&json!({
+            "session_id": session_id,
+            "cursor": cursor
+        }))
+        .expect_err("stale cursor should fail");
+        assert!(err.contains("scan snapshot changed"));
+
+        remove_scan_session(session_id);
+    }
+
+    #[test]
+    fn scan_list_rejects_zero_result_page_limit() {
+        let session_id = "scan_test_zero_limit";
+        insert_scan_session(session_id, 1);
+
+        let err = scan_list(&json!({
+            "session_id": session_id,
+            "limit": 0
+        }))
+        .expect_err("zero limit should fail");
+        assert!(err.contains("greater than 0"));
+
+        remove_scan_session(session_id);
+    }
+
+    #[test]
+    fn scan_list_summary_only_returns_metadata_without_candidates_or_cursor() {
+        let session_id = "scan_test_summary_only";
+        insert_scan_session(session_id, 1);
+
+        let result = scan_list(&json!({
+            "session_id": session_id,
+            "limit": 1,
+            "summary_only": true
+        }))
+        .expect("summary-only scan list");
+
+        assert_eq!(result["session_id"], session_id);
+        assert_eq!(result["summary_only"], true);
+        assert_eq!(result["total"], 3);
+        assert_eq!(result["count"], 0);
+        assert_eq!(result["candidates"].as_array().unwrap().len(), 0);
+        assert!(result.get("nextCursor").is_none());
+        assert_eq!(result["snapshot"]["total"], 3);
+
+        remove_scan_session(session_id);
+    }
+
+    #[test]
+    fn scan_list_sorts_candidates_and_binds_cursor_to_sort_mode() {
+        let session_id = "scan_test_sort";
+        insert_scan_session_with_results(
+            session_id,
+            1,
+            vec![
+                ScanEntry {
+                    address: 0x3000,
+                    value: 3u32.to_le_bytes().to_vec(),
+                },
+                ScanEntry {
+                    address: 0x1000,
+                    value: 1u32.to_le_bytes().to_vec(),
+                },
+                ScanEntry {
+                    address: 0x2000,
+                    value: 2u32.to_le_bytes().to_vec(),
+                },
+            ],
+        );
+
+        let first = scan_list(&json!({
+            "session_id": session_id,
+            "limit": 2,
+            "sort": "address_asc"
+        }))
+        .expect("sorted first page");
+        assert_eq!(first["sort"], "address_asc");
+        assert_eq!(first["candidates"][0]["address"], "0x0000000000001000");
+        assert_eq!(first["candidates"][0]["index"], 1);
+        assert_eq!(first["candidates"][1]["address"], "0x0000000000002000");
+        assert_eq!(first["candidates"][1]["index"], 2);
+        let cursor = first["nextCursor"]
+            .as_str()
+            .expect("next cursor")
+            .to_string();
+
+        let mismatch = scan_list(&json!({
+            "session_id": session_id,
+            "cursor": cursor,
+            "sort": "address_desc"
+        }))
+        .expect_err("cursor should be bound to sort");
+        assert!(mismatch.contains("sort mode mismatch"));
+
+        let second = scan_list(&json!({
+            "session_id": session_id,
+            "cursor": first["nextCursor"].as_str().unwrap(),
+            "sort": "address_asc"
+        }))
+        .expect("sorted second page");
+        assert_eq!(second["count"], 1);
+        assert_eq!(second["candidates"][0]["address"], "0x0000000000003000");
+        assert_eq!(second["candidates"][0]["index"], 0);
+
+        remove_scan_session(session_id);
+    }
+
+    #[test]
+    fn scan_list_rejects_invalid_sort_value() {
+        let session_id = "scan_test_invalid_sort";
+        insert_scan_session(session_id, 1);
+
+        let err = scan_list(&json!({
+            "session_id": session_id,
+            "sort": "bad"
+        }))
+        .expect_err("invalid sort should fail");
+        assert!(err.contains("Invalid 'sort'"));
+
+        remove_scan_session(session_id);
+    }
+
+    #[test]
+    fn scan_list_exports_full_session_candidates_to_artifact() {
+        let session_id = "scan_test_export";
+        insert_scan_session(session_id, 1);
+        let output_path = std::env::temp_dir().join(format!(
+            "memoric-scan-export-{}-{}.json",
+            std::process::id(),
+            session_id
+        ));
+        let _ = std::fs::remove_file(&output_path);
+
+        let result = scan_list(&json!({
+            "session_id": session_id,
+            "limit": 1,
+            "sort": "address_desc",
+            "output_path": output_path.display().to_string(),
+            "artifact_retention_secs": 60,
+            "request_id": "scan-export-test"
+        }))
+        .expect("scan export");
+
+        assert_eq!(result["count"], 1);
+        assert_eq!(result["total"], 3);
+        assert_eq!(result["exported_count"], 3);
+        assert_eq!(result["redaction_status"], "artifact");
+        assert_eq!(result["output_path"], output_path.display().to_string());
+        let uri = result["artifact"]["uri"].as_str().expect("artifact uri");
+        assert!(crate::artifact::is_artifact_uri(uri));
+
+        let exported: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&output_path).expect("scan artifact file"))
+                .expect("scan artifact json");
+        assert_eq!(exported["kind"], "scan-results");
+        assert_eq!(exported["session_id"], session_id);
+        assert_eq!(exported["sort"], "address_desc");
+        assert_eq!(exported["total"], 3);
+        assert_eq!(exported["candidates"].as_array().unwrap().len(), 3);
+        assert_eq!(exported["candidates"][0]["address"], "0x0000000000003000");
+
+        let _ = crate::artifact::forget(uri);
+        let _ = std::fs::remove_file(output_path);
+        remove_scan_session(session_id);
+    }
+
+    #[test]
+    fn scan_list_auto_exports_large_session_candidates_to_artifact() {
+        let session_id = "scan_test_auto_export";
+        let results = (0..1001)
+            .map(|idx| ScanEntry {
+                address: 0x1000 + (idx as u64 * 4),
+                value: (idx as u32).to_le_bytes().to_vec(),
+            })
+            .collect::<Vec<_>>();
+        insert_scan_session_with_results(session_id, 1, results);
+
+        let result = scan_list(&json!({
+            "session_id": session_id,
+            "limit": 1,
+            "artifact_retention_secs": 60,
+            "request_id": "scan-auto-export-test"
+        }))
+        .expect("scan auto export");
+
+        assert_eq!(result["count"], 1);
+        assert_eq!(result["total"], 1001);
+        assert_eq!(result["exported_count"], 1001);
+        assert_eq!(result["redaction_status"], "artifact");
+        assert_eq!(result["export_reason"], "large_session_auto");
+        let uri = result["artifact"]["uri"].as_str().expect("artifact uri");
+        assert!(crate::artifact::is_artifact_uri(uri));
+        let output_path = result["output_path"].as_str().expect("output path");
+        assert!(std::path::Path::new(output_path).exists());
+
+        let _ = crate::artifact::forget(uri);
+        let _ = std::fs::remove_file(output_path);
+        remove_scan_session(session_id);
+    }
+
+    #[test]
+    fn scan_delta_summary_reports_safe_counts_without_raw_bytes() {
+        let summary = build_scan_delta_summary(10, 4, 3, 5, 2);
+
+        assert_eq!(summary["before"], 10);
+        assert_eq!(summary["after"], 4);
+        assert_eq!(summary["added"], 0);
+        assert_eq!(summary["removed"], 6);
+        assert_eq!(summary["changed"], 3);
+        assert_eq!(summary["unchanged"], 5);
+        assert_eq!(summary["unreadable"], 2);
+        assert_eq!(summary["readable"], 8);
+        assert_eq!(summary["retained"], 4);
+        assert!(summary.get("value").is_none());
+        assert!(summary.get("hex").is_none());
+        assert!(summary.get("bytes").is_none());
     }
 }

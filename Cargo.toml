@@ -20,6 +20,7 @@ windows = { version = "0.58", features = [
     "Win32_Security_Authentication",
     "Win32_Security_Authentication_Identity",
     "Win32_System_ProcessStatus",
+    "Win32_System_RemoteDesktop",
     "Win32_System_WindowsProgramming",
     "Win32_System_Console",
     "Win32_System_Pipes",
@@ -67,6 +68,7 @@ lazy_static = "1.5"
 chrono = "0.4"
 hex = "0.4"
 fastrand = "2.0"
+sha2 = "0.10"
 
 [dev-dependencies]
 

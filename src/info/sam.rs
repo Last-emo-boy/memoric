@@ -88,6 +88,7 @@ pub fn dump_sam_hive(args: &Value) -> Result<Value, MemoricError> {
 
             if save_result.0 == 0 {
                 let size = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
+                let artifact = register_hive_artifact(args, &file_path).ok();
                 tracing::info!(
                     "[SAM] Dumped {} hive → {} ({} bytes)",
                     key_name,
@@ -98,7 +99,9 @@ pub fn dump_sam_hive(args: &Value) -> Result<Value, MemoricError> {
                     "hive": key_name,
                     "status": "success",
                     "path": file_path,
-                    "size_bytes": size
+                    "size_bytes": size,
+                    "artifact": artifact,
+                    "redaction_status": "artifact"
                 }));
             } else {
                 tracing::error!(
@@ -135,4 +138,43 @@ pub fn dump_sam_hive(args: &Value) -> Result<Value, MemoricError> {
             "impacket-secretsdump -sam sam.hive -security security.hive LOCAL"
         ]
     }))
+}
+
+fn register_hive_artifact(args: &Value, file_path: &str) -> Result<Value, MemoricError> {
+    let correlation_id = crate::observability::correlation_id_from_args(args);
+    crate::artifact::register_file_artifact_with_correlation(
+        std::path::Path::new(file_path),
+        crate::artifact::retention_secs_from_args(args),
+        correlation_id.as_deref(),
+    )
+    .map_err(|e| MemoricError::Other(format!("register hive artifact: {}", e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::register_hive_artifact;
+    use serde_json::json;
+
+    #[test]
+    fn register_hive_artifact_reports_resource_metadata() {
+        let path = std::env::temp_dir().join(format!(
+            "memoric-sam-hive-artifact-{}.hive",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"hive bytes").expect("fixture hive");
+
+        let artifact = register_hive_artifact(
+            &json!({"artifact_retention_secs": 60, "chain_id": "sam-artifact-test"}),
+            path.to_str().unwrap(),
+        )
+        .expect("register hive artifact");
+
+        assert_eq!(artifact["size_bytes"], 10);
+        assert!(artifact["sha256"].as_str().is_some());
+        let uri = artifact["uri"].as_str().expect("artifact uri");
+        assert!(crate::artifact::is_artifact_uri(uri));
+
+        let _ = crate::artifact::forget(uri);
+        let _ = std::fs::remove_file(path);
+    }
 }

@@ -1,0 +1,63 @@
+name: Privileged Windows Integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_privileged_integration:
+        description: "Run tests that require an elevated self-hosted Windows runner and a local driver artifact."
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+      driver_path:
+        description: "Path to memoric.sys on the self-hosted runner."
+        required: true
+        default: "driver/memoric.sys"
+      test_filter:
+        description: "Cargo test filter for privileged integration cases."
+        required: true
+        default: "privileged"
+
+env:
+  CARGO_TERM_COLOR: always
+  MEMORIC_PRIVILEGED_INTEGRATION: "1"
+
+jobs:
+  privileged-windows:
+    name: Privileged integration
+    if: ${{ inputs.run_privileged_integration == 'true' }}
+    runs-on: [self-hosted, Windows, privileged]
+    environment: privileged-integration
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.80.0
+      - uses: Swatinem/rust-cache@v2
+      - name: verify elevated runner and driver artifact
+        shell: pwsh
+        env:
+          MEMORIC_INPUT_DRIVER_PATH: ${{ inputs.driver_path }}
+        run: |
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+          $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          if (-not $isAdmin) {
+            throw "Privileged integration requires an elevated self-hosted Windows runner."
+          }
+
+          $driverPath = $env:MEMORIC_INPUT_DRIVER_PATH
+          if (-not (Test-Path -LiteralPath $driverPath)) {
+            throw "Privileged integration requires a local driver artifact at '$driverPath'."
+          }
+          "MEMORIC_DRIVER_PATH=$driverPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: privileged cargo tests
+        shell: pwsh
+        env:
+          MEMORIC_INPUT_TEST_FILTER: ${{ inputs.test_filter }}
+        run: |
+          $filter = $env:MEMORIC_INPUT_TEST_FILTER
+          if ($filter -notmatch '^[A-Za-z0-9_:\.\-]+$') {
+            throw "test_filter may only contain letters, digits, underscore, colon, dot, or dash."
+          }
+          cargo test --all-targets "$filter" -- --ignored --nocapture

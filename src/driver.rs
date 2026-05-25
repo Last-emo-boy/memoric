@@ -14,6 +14,7 @@
 //! ```
 
 use crate::error::MemoricError;
+use serde_json::{json, Value};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::Storage::FileSystem::{
@@ -21,14 +22,13 @@ use windows::Win32::Storage::FileSystem::{
     OPEN_EXISTING,
 };
 use windows::Win32::System::Services::{
-    CreateServiceW, DeleteService, OpenSCManagerW, OpenServiceW, StartServiceW,
+    CloseServiceHandle, CreateServiceW, DeleteService, OpenSCManagerW, OpenServiceW, StartServiceW,
     SC_MANAGER_CREATE_SERVICE, SERVICE_ALL_ACCESS, SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL,
     SERVICE_KERNEL_DRIVER,
 };
 use windows::Win32::System::IO::DeviceIoControl;
 
-const EMBEDDED_DRIVER_BYTES: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/driver/memoric.sys"));
+pub const EMBEDDED_DRIVER_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/driver/memoric.sys");
 
 // ================================================================
 // IOCTL codes - must match driver/memoric.h exactly
@@ -103,12 +103,34 @@ const IOCTL_MEMORIC_CALLBACK_NUKE: u32 = 0x800020F0;
 const IOCTL_MEMORIC_MINIFILTER_DETACH: u32 = 0x800020F4;
 const IOCTL_MEMORIC_KERNEL_APC_INJECT: u32 = 0x800020FC;
 const IOCTL_MEMORIC_WFP_REMOVE: u32 = 0x80002100;
+const IOCTL_MEMORIC_CAPABILITIES: u32 = 0x80002104;
 
 const MEMORIC_MAX_IO_SIZE: usize = 4 * 1024 * 1024;
 const MEMORIC_MAX_FORCE_WRITE: usize = 4096;
+const MEMORIC_ABI_VERSION: u32 = 1;
+const MEMORIC_DRIVER_VERSION: u32 = (1 << 16) | 1;
+const MEMORIC_DRIVER_OVERRIDE_ENV: &str = "MEMORIC_ALLOW_UNSUPPORTED_DRIVER";
+
+pub const MEMORIC_CAP_PHYSICAL_MEMORY: u64 = 1 << 0;
+pub const MEMORIC_CAP_VIRTUAL_MEMORY: u64 = 1 << 1;
+pub const MEMORIC_CAP_PROCESS_INFO: u64 = 1 << 2;
+pub const MEMORIC_CAP_KERNEL_WRITE: u64 = 1 << 3;
+pub const MEMORIC_CAP_PROCESS_ENUM: u64 = 1 << 4;
+pub const MEMORIC_CAP_CALLBACKS: u64 = 1 << 5;
+pub const MEMORIC_CAP_REGISTRY_PROTECT: u64 = 1 << 6;
+pub const MEMORIC_CAP_NOTIFICATIONS: u64 = 1 << 7;
+pub const MEMORIC_CAP_PROCESS_DUMP: u64 = 1 << 8;
+pub const MEMORIC_CAP_HYPERVISOR_DETECT: u64 = 1 << 9;
+pub const MEMORIC_CAP_TESTSIGN: u64 = 1 << 10;
+pub const MEMORIC_CAP_GLOBAL_HOOKS: u64 = 1 << 11;
+pub const MEMORIC_CAP_KERNEL_EXEC: u64 = 1 << 12;
+pub const MEMORIC_CAP_DESTRUCTIVE_OPS: u64 = 1 << 13;
 
 const DEVICE_PATH: &str = "\\\\.\\Memoric";
 const SERVICE_NAME: &str = "memoric";
+const WIN32_ERROR_SERVICE_ALREADY_RUNNING: u32 = 1056;
+const WIN32_ERROR_SERVICE_DOES_NOT_EXIST: u32 = 1060;
+const WIN32_ERROR_SERVICE_MARKED_FOR_DELETE: u32 = 1072;
 
 // ================================================================
 // Request / Response structures - must match driver/memoric.h
@@ -193,6 +215,25 @@ impl EprocessInfo {
             .position(|&b| b == 0)
             .unwrap_or(self.image_file_name.len());
         String::from_utf8_lossy(&self.image_file_name[..end]).to_string()
+    }
+
+    pub fn offset_snapshot(&self) -> crate::kernel_offsets::EprocessOffsetSnapshot {
+        crate::kernel_offsets::EprocessOffsetSnapshot {
+            unique_process_id: self.unique_process_id_off,
+            active_process_links: self.active_process_links_off,
+            token: self.token_off,
+            protection: self.protection_off,
+            image_file_name: self.image_file_name_off,
+            vad_root: self.vad_root_off,
+        }
+    }
+
+    pub fn offset_profile_json(&self, build_number: u32, offsets_resolved: bool) -> Value {
+        crate::kernel_offsets::eprocess_runtime_profile_json(
+            build_number,
+            offsets_resolved,
+            self.offset_snapshot(),
+        )
     }
 }
 
@@ -584,6 +625,61 @@ pub struct ObjectHookResponse {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
+pub struct DriverCapabilities {
+    pub size: u32,
+    pub abi_version: u32,
+    pub driver_version: u32,
+    pub build_number: u32,
+    pub max_io_size: u32,
+    pub max_force_write: u32,
+    pub offsets_resolved: u32,
+    pub reserved: u32,
+    pub capability_flags: u64,
+    pub capability_flags2: u64,
+}
+
+impl DriverCapabilities {
+    fn unsupported_placeholder() -> Self {
+        Self {
+            size: std::mem::size_of::<Self>() as u32,
+            abi_version: 0,
+            driver_version: 0,
+            build_number: 0,
+            max_io_size: 0,
+            max_force_write: 0,
+            offsets_resolved: 0,
+            reserved: 0,
+            capability_flags: 0,
+            capability_flags2: 0,
+        }
+    }
+
+    pub fn supports(&self, capability: u64) -> bool {
+        self.capability_flags & capability == capability
+    }
+
+    pub fn version_string(&self) -> String {
+        format!(
+            "{}.{}",
+            self.driver_version >> 16,
+            self.driver_version & 0xFFFF
+        )
+    }
+
+    pub fn is_supported(&self) -> bool {
+        self.abi_version == MEMORIC_ABI_VERSION && self.driver_version >= MEMORIC_DRIVER_VERSION
+    }
+
+    pub fn offset_profile_json(&self) -> Value {
+        crate::kernel_offsets::driver_offset_profile_json(
+            self.build_number,
+            self.offsets_resolved != 0,
+        )
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct DriverStatsResponse {
     pub total_ioctls: u32,
     pub success_ioctls: u32,
@@ -601,6 +697,15 @@ pub struct DriverStatsResponse {
     pub dpc_timers_active: u32,
     pub hidden_port_count: u32,
     pub protected_key_count: u32,
+}
+
+impl DriverStatsResponse {
+    pub fn offset_profile_json(&self) -> Value {
+        crate::kernel_offsets::driver_offset_profile_json(
+            self.build_number,
+            self.offsets_resolved != 0,
+        )
+    }
 }
 
 // Pool query structures
@@ -1536,12 +1641,267 @@ pub struct MemoricDriver {
     handle: HANDLE,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DriverLifecycleStage {
+    CheckExistingDevice,
+    ExtractEmbeddedDriver,
+    CopyDriverFile,
+    OpenScm,
+    CreateService,
+    OpenExistingService,
+    StartService,
+    OpenDevice,
+    ValidateCapabilities,
+    StopService,
+    DeleteService,
+    CloseHandles,
+    Complete,
+}
+
+impl DriverLifecycleStage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CheckExistingDevice => "check_existing_device",
+            Self::ExtractEmbeddedDriver => "extract_embedded_driver",
+            Self::CopyDriverFile => "copy_driver_file",
+            Self::OpenScm => "open_scm",
+            Self::CreateService => "create_service",
+            Self::OpenExistingService => "open_existing_service",
+            Self::StartService => "start_service",
+            Self::OpenDevice => "open_device",
+            Self::ValidateCapabilities => "validate_capabilities",
+            Self::StopService => "stop_service",
+            Self::DeleteService => "delete_service",
+            Self::CloseHandles => "close_handles",
+            Self::Complete => "complete",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DriverLifecycleStep {
+    pub stage: DriverLifecycleStage,
+    pub success: bool,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct DriverLifecycleReport {
+    operation: &'static str,
+    service_name: String,
+    driver_path: Option<String>,
+    pub failed_stage: Option<DriverLifecycleStage>,
+    steps: Vec<DriverLifecycleStep>,
+    cleanup: Vec<DriverLifecycleStep>,
+}
+
+impl DriverLifecycleReport {
+    pub fn new(operation: &'static str) -> Self {
+        Self {
+            operation,
+            service_name: SERVICE_NAME.to_string(),
+            driver_path: None,
+            failed_stage: None,
+            steps: Vec::new(),
+            cleanup: Vec::new(),
+        }
+    }
+
+    pub fn with_driver_path(mut self, path: impl Into<String>) -> Self {
+        self.driver_path = Some(path.into());
+        self
+    }
+
+    pub fn record(
+        &mut self,
+        stage: DriverLifecycleStage,
+        success: bool,
+        detail: impl Into<String>,
+    ) {
+        if !success && self.failed_stage.is_none() {
+            self.failed_stage = Some(stage);
+        }
+        self.steps.push(DriverLifecycleStep {
+            stage,
+            success,
+            detail: detail.into(),
+        });
+    }
+
+    pub fn record_recoverable_failure(
+        &mut self,
+        stage: DriverLifecycleStage,
+        detail: impl Into<String>,
+    ) {
+        self.steps.push(DriverLifecycleStep {
+            stage,
+            success: false,
+            detail: detail.into(),
+        });
+    }
+
+    pub fn record_cleanup(
+        &mut self,
+        stage: DriverLifecycleStage,
+        success: bool,
+        detail: impl Into<String>,
+    ) {
+        self.cleanup.push(DriverLifecycleStep {
+            stage,
+            success,
+            detail: detail.into(),
+        });
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({
+            "operation": self.operation,
+            "service_name": self.service_name,
+            "driver_path": self.driver_path,
+            "failed_stage": self.failed_stage.map(DriverLifecycleStage::as_str),
+            "steps": self.steps.iter().map(lifecycle_step_json).collect::<Vec<_>>(),
+            "cleanup": self.cleanup.iter().map(lifecycle_step_json).collect::<Vec<_>>(),
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct DriverLifecycleError {
+    pub report: DriverLifecycleReport,
+    pub message: String,
+}
+
+impl DriverLifecycleError {
+    fn new(report: DriverLifecycleReport, message: impl Into<String>) -> Self {
+        Self {
+            report,
+            message: message.into(),
+        }
+    }
+}
+
+fn lifecycle_step_json(step: &DriverLifecycleStep) -> Value {
+    json!({
+        "stage": step.stage.as_str(),
+        "success": step.success,
+        "detail": step.detail,
+    })
+}
+
+fn service_error_matches(error: &windows::core::Error, win32_codes: &[u32]) -> bool {
+    let code = error.code().0 as u32;
+    win32_codes
+        .iter()
+        .any(|&win32| code == win32 || code == hresult_from_win32(win32))
+}
+
+fn hresult_from_win32(code: u32) -> u32 {
+    if code == 0 {
+        0
+    } else {
+        (code & 0x0000_FFFF) | 0x8007_0000
+    }
+}
+
 // HANDLE is Send+Sync safe for kernel device handles
 unsafe impl Send for MemoricDriver {}
 unsafe impl Sync for MemoricDriver {}
 
+#[cfg(test)]
+thread_local! {
+    static TEST_IOCTL_MOCK: std::cell::RefCell<Option<TestIoctlMock>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct TestIoctlMock {
+    expected: std::collections::VecDeque<TestIoctlExpectation>,
+    calls: Vec<TestIoctlCall>,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct TestIoctlExpectation {
+    code: u32,
+    input: Vec<u8>,
+    output_size: usize,
+    output: Vec<u8>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TestIoctlCall {
+    code: u32,
+    input: Vec<u8>,
+    output_size: usize,
+}
+
+#[cfg(test)]
+impl TestIoctlMock {
+    fn new(expected: Vec<TestIoctlExpectation>) -> Self {
+        Self {
+            expected: expected.into(),
+            calls: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl TestIoctlExpectation {
+    fn new(code: u32, input: Vec<u8>, output_size: usize, output: Vec<u8>) -> Self {
+        Self {
+            code,
+            input,
+            output_size,
+            output,
+        }
+    }
+}
+
+#[cfg(test)]
+fn test_ioctl_dispatch(
+    code: u32,
+    input: &[u8],
+    output_size: usize,
+) -> Option<Result<Vec<u8>, MemoricError>> {
+    TEST_IOCTL_MOCK.with(|mock| {
+        let mut mock = mock.borrow_mut();
+        let mock = mock.as_mut()?;
+        let expected = mock
+            .expected
+            .pop_front()
+            .expect("mock DeviceIoControl called more times than expected");
+
+        let call = TestIoctlCall {
+            code,
+            input: input.to_vec(),
+            output_size,
+        };
+
+        assert_eq!(call.code, expected.code, "mock IOCTL code mismatch");
+        assert_eq!(
+            call.input, expected.input,
+            "mock IOCTL input bytes mismatch for 0x{code:08X}"
+        );
+        assert_eq!(
+            call.output_size, expected.output_size,
+            "mock IOCTL output size mismatch for 0x{code:08X}"
+        );
+
+        mock.calls.push(call);
+        Some(Ok(expected.output))
+    })
+}
+
 impl MemoricDriver {
     fn extract_embedded_driver() -> Result<std::path::PathBuf, MemoricError> {
+        let embedded_driver_bytes = std::fs::read(EMBEDDED_DRIVER_PATH).map_err(|e| {
+            MemoricError::WindowsApi(format!(
+                "Embedded memoric.sys payload is unavailable at {}: {}. Build the driver first or load an explicit driver_path.",
+                EMBEDDED_DRIVER_PATH, e
+            ))
+        })?;
         let extract_dir = std::env::temp_dir().join("memoric");
         std::fs::create_dir_all(&extract_dir).map_err(|e| {
             MemoricError::WindowsApi(format!("Failed to create extract dir: {}", e))
@@ -1549,12 +1909,12 @@ impl MemoricDriver {
 
         let extract_path = extract_dir.join("memoric.sys");
         let should_write = match std::fs::metadata(&extract_path) {
-            Ok(meta) => meta.len() != EMBEDDED_DRIVER_BYTES.len() as u64,
+            Ok(meta) => meta.len() != embedded_driver_bytes.len() as u64,
             Err(_) => true,
         };
 
         if should_write {
-            std::fs::write(&extract_path, EMBEDDED_DRIVER_BYTES).map_err(|e| {
+            std::fs::write(&extract_path, &embedded_driver_bytes).map_err(|e| {
                 MemoricError::WindowsApi(format!("Failed to extract embedded memoric.sys: {}", e))
             })?;
             tracing::info!(
@@ -1567,26 +1927,97 @@ impl MemoricDriver {
     }
 
     pub fn ensure() -> Result<Self, MemoricError> {
-        if let Ok(driver) = Self::open() {
-            return Ok(driver);
+        Self::ensure_with_lifecycle().map_err(|err| {
+            MemoricError::WindowsApi(format!(
+                "{} lifecycle={}",
+                err.message,
+                err.report.to_json()
+            ))
+        })
+    }
+
+    pub fn ensure_with_lifecycle() -> Result<Self, DriverLifecycleError> {
+        let mut report = DriverLifecycleReport::new("ensure");
+        match Self::open() {
+            Ok(driver) => {
+                report.record(
+                    DriverLifecycleStage::CheckExistingDevice,
+                    true,
+                    "existing memoric device opened",
+                );
+                return Ok(driver);
+            }
+            Err(err) => {
+                report.record(
+                    DriverLifecycleStage::CheckExistingDevice,
+                    false,
+                    err.to_string(),
+                );
+            }
         }
 
-        let extracted_driver = Self::extract_embedded_driver()?;
+        let extracted_driver = Self::extract_embedded_driver().map_err(|err| {
+            report.record(
+                DriverLifecycleStage::ExtractEmbeddedDriver,
+                false,
+                err.to_string(),
+            );
+            DriverLifecycleError::new(report.clone(), "failed to extract embedded memoric driver")
+        })?;
         let extracted_path = extracted_driver.to_string_lossy().to_string();
+        report.driver_path = Some(extracted_path.clone());
+        report.record(
+            DriverLifecycleStage::ExtractEmbeddedDriver,
+            true,
+            extracted_path.clone(),
+        );
 
-        match Self::load(&extracted_path) {
+        match Self::load_with_lifecycle(&extracted_path) {
             Ok(driver) => Ok(driver),
             Err(first_err) => {
                 tracing::warn!(
                     "[DRIVER] Initial memoric load failed: {}. Retrying after cleanup.",
-                    first_err
+                    first_err.message
                 );
-                let _ = Self::unload();
-                Self::load(&extracted_path).map_err(|second_err| {
-                    MemoricError::WindowsApi(format!(
-                        "Failed to ensure memoric driver from embedded payload. first_error={}, retry_error={}",
-                        first_err, second_err
-                    ))
+                report.record(
+                    first_err
+                        .report
+                        .failed_stage
+                        .unwrap_or(DriverLifecycleStage::Complete),
+                    false,
+                    first_err.message.clone(),
+                );
+                match Self::unload_with_lifecycle() {
+                    Ok(cleanup_report) => report.record_cleanup(
+                        DriverLifecycleStage::Complete,
+                        true,
+                        cleanup_report.to_json().to_string(),
+                    ),
+                    Err(cleanup_err) => report.record_cleanup(
+                        cleanup_err
+                            .report
+                            .failed_stage
+                            .unwrap_or(DriverLifecycleStage::Complete),
+                        false,
+                        cleanup_err.message,
+                    ),
+                }
+                Self::load_with_lifecycle(&extracted_path).map_err(|second_err| {
+                    report.record(
+                        second_err
+                            .report
+                            .failed_stage
+                            .unwrap_or(DriverLifecycleStage::Complete),
+                        false,
+                        second_err.message.clone(),
+                    );
+                    DriverLifecycleError::new(
+                        report,
+                        format!(
+                            "Failed to ensure memoric driver from embedded payload. first_error={}, retry_error={}",
+                            first_err.message, second_err.message
+                        ),
+                    )
                 })
             }
         }
@@ -1594,6 +2025,12 @@ impl MemoricDriver {
 
     /// Open the memoric driver device. Returns error if driver is not loaded.
     pub fn open() -> Result<Self, MemoricError> {
+        let driver = Self::open_device()?;
+        driver.validate_capabilities()?;
+        Ok(driver)
+    }
+
+    fn open_device() -> Result<Self, MemoricError> {
         let path: Vec<u16> = DEVICE_PATH
             .encode_utf16()
             .chain(std::iter::once(0))
@@ -1628,15 +2065,33 @@ impl MemoricDriver {
 
     /// Load the memoric driver from a .sys file path, then open the device.
     pub fn load(sys_path: &str) -> Result<Self, MemoricError> {
+        Self::load_with_lifecycle(sys_path).map_err(|err| {
+            MemoricError::WindowsApi(format!(
+                "{} lifecycle={}",
+                err.message,
+                err.report.to_json()
+            ))
+        })
+    }
+
+    pub fn load_with_lifecycle(sys_path: &str) -> Result<Self, DriverLifecycleError> {
+        let mut report = DriverLifecycleReport::new("load").with_driver_path(sys_path);
         let driver_dest = r"C:\Windows\System32\drivers\memoric.sys";
 
         // Copy driver to System32\drivers
-        std::fs::copy(sys_path, driver_dest)
-            .map_err(|e| MemoricError::WindowsApi(format!("Failed to copy driver: {}", e)))?;
+        std::fs::copy(sys_path, driver_dest).map_err(|e| {
+            report.record(DriverLifecycleStage::CopyDriverFile, false, e.to_string());
+            DriverLifecycleError::new(report.clone(), format!("Failed to copy driver: {}", e))
+        })?;
+        report.record(DriverLifecycleStage::CopyDriverFile, true, driver_dest);
 
         unsafe {
-            let sc_manager = OpenSCManagerW(None, None, SC_MANAGER_CREATE_SERVICE)
-                .map_err(|e| MemoricError::WindowsApi(format!("OpenSCManager: {}", e)))?;
+            let sc_manager =
+                OpenSCManagerW(None, None, SC_MANAGER_CREATE_SERVICE).map_err(|e| {
+                    report.record(DriverLifecycleStage::OpenScm, false, e.to_string());
+                    DriverLifecycleError::new(report.clone(), format!("OpenSCManager: {}", e))
+                })?;
+            report.record(DriverLifecycleStage::OpenScm, true, "SCM opened");
 
             let svc_name: Vec<u16> = SERVICE_NAME
                 .encode_utf16()
@@ -1663,50 +2118,225 @@ impl MemoricDriver {
                 None,
                 None,
             )
-            .or_else(|_| OpenServiceW(sc_manager, PCWSTR(svc_name.as_ptr()), SERVICE_ALL_ACCESS))
-            .map_err(|e| MemoricError::WindowsApi(format!("Create/Open service: {}", e)))?;
+            .map(|service| {
+                report.record(DriverLifecycleStage::CreateService, true, "service created");
+                service
+            })
+            .or_else(|create_err| {
+                report.record_recoverable_failure(
+                    DriverLifecycleStage::CreateService,
+                    format!("create failed; trying existing service: {}", create_err),
+                );
+                OpenServiceW(sc_manager, PCWSTR(svc_name.as_ptr()), SERVICE_ALL_ACCESS).map(
+                    |service| {
+                        report.record(
+                            DriverLifecycleStage::OpenExistingService,
+                            true,
+                            "existing service opened",
+                        );
+                        service
+                    },
+                )
+            })
+            .map_err(|e| {
+                report.record(
+                    DriverLifecycleStage::OpenExistingService,
+                    false,
+                    e.to_string(),
+                );
+                let _ = CloseServiceHandle(sc_manager);
+                DriverLifecycleError::new(report.clone(), format!("Create/Open service: {}", e))
+            })?;
 
             // Start service
-            let _ = StartServiceW(service, None);
+            match StartServiceW(service, None) {
+                Ok(()) => {
+                    report.record(DriverLifecycleStage::StartService, true, "service started")
+                }
+                Err(err) if service_error_matches(&err, &[WIN32_ERROR_SERVICE_ALREADY_RUNNING]) => {
+                    report.record(
+                        DriverLifecycleStage::StartService,
+                        true,
+                        format!("service already running: {}", err),
+                    )
+                }
+                Err(err) => {
+                    report.record(DriverLifecycleStage::StartService, false, err.to_string());
+                    let service_closed = CloseServiceHandle(service).is_ok();
+                    let scm_closed = CloseServiceHandle(sc_manager).is_ok();
+                    report.record_cleanup(
+                        DriverLifecycleStage::CloseHandles,
+                        service_closed && scm_closed,
+                        format!(
+                            "service_closed={}, scm_closed={}",
+                            service_closed, scm_closed
+                        ),
+                    );
+                    return Err(DriverLifecycleError::new(
+                        report.clone(),
+                        format!("Start service: {}", err),
+                    ));
+                }
+            }
 
-            let _ = CloseHandle(HANDLE(service.0 as *mut _));
-            let _ = CloseHandle(HANDLE(sc_manager.0 as *mut _));
+            let service_closed = CloseServiceHandle(service).is_ok();
+            let scm_closed = CloseServiceHandle(sc_manager).is_ok();
+            report.record_cleanup(
+                DriverLifecycleStage::CloseHandles,
+                service_closed && scm_closed,
+                format!(
+                    "service_closed={}, scm_closed={}",
+                    service_closed, scm_closed
+                ),
+            );
         }
 
         // Wait briefly for device to appear
         std::thread::sleep(std::time::Duration::from_millis(500));
 
-        Self::open()
+        let driver = Self::open_device().map_err(|err| {
+            report.record(DriverLifecycleStage::OpenDevice, false, err.to_string());
+            DriverLifecycleError::new(report.clone(), format!("Open memoric device: {}", err))
+        })?;
+        report.record(DriverLifecycleStage::OpenDevice, true, DEVICE_PATH);
+
+        driver.validate_capabilities().map_err(|err| {
+            report.record(
+                DriverLifecycleStage::ValidateCapabilities,
+                false,
+                err.to_string(),
+            );
+            DriverLifecycleError::new(
+                report.clone(),
+                format!("Validate driver capabilities: {}", err),
+            )
+        })?;
+        report.record(
+            DriverLifecycleStage::ValidateCapabilities,
+            true,
+            "driver ABI/capability handshake accepted",
+        );
+        report.record(DriverLifecycleStage::Complete, true, "driver loaded");
+        Ok(driver)
     }
 
     /// Unload the memoric driver.
     pub fn unload() -> Result<(), MemoricError> {
+        Self::unload_with_lifecycle().map_err(|err| {
+            MemoricError::WindowsApi(format!(
+                "{} lifecycle={}",
+                err.message,
+                err.report.to_json()
+            ))
+        })?;
+        Ok(())
+    }
+
+    pub fn unload_with_lifecycle() -> Result<DriverLifecycleReport, DriverLifecycleError> {
         use windows::Win32::System::Services::{
             ControlService, SERVICE_CONTROL_STOP, SERVICE_STATUS,
         };
 
+        let mut report = DriverLifecycleReport::new("unload");
         unsafe {
-            let sc_manager = OpenSCManagerW(None, None, SC_MANAGER_CREATE_SERVICE)
-                .map_err(|e| MemoricError::WindowsApi(format!("OpenSCManager: {}", e)))?;
+            let sc_manager =
+                OpenSCManagerW(None, None, SC_MANAGER_CREATE_SERVICE).map_err(|e| {
+                    report.record(DriverLifecycleStage::OpenScm, false, e.to_string());
+                    DriverLifecycleError::new(report.clone(), format!("OpenSCManager: {}", e))
+                })?;
+            report.record(DriverLifecycleStage::OpenScm, true, "SCM opened");
 
             let svc_name: Vec<u16> = SERVICE_NAME
                 .encode_utf16()
                 .chain(std::iter::once(0))
                 .collect();
-            let service = OpenServiceW(sc_manager, PCWSTR(svc_name.as_ptr()), SERVICE_ALL_ACCESS)
-                .map_err(|e| MemoricError::WindowsApi(format!("OpenService: {}", e)))?;
+            let service =
+                match OpenServiceW(sc_manager, PCWSTR(svc_name.as_ptr()), SERVICE_ALL_ACCESS) {
+                    Ok(service) => {
+                        report.record(
+                            DriverLifecycleStage::OpenExistingService,
+                            true,
+                            "existing service opened",
+                        );
+                        service
+                    }
+                    Err(e) => {
+                        if service_error_matches(
+                            &e,
+                            &[
+                                WIN32_ERROR_SERVICE_DOES_NOT_EXIST,
+                                WIN32_ERROR_SERVICE_MARKED_FOR_DELETE,
+                            ],
+                        ) {
+                            report.record(
+                                DriverLifecycleStage::OpenExistingService,
+                                true,
+                                format!("service already absent: {}", e),
+                            );
+                        } else {
+                            report.record(
+                                DriverLifecycleStage::OpenExistingService,
+                                false,
+                                e.to_string(),
+                            );
+                        }
+                        let scm_closed = CloseServiceHandle(sc_manager).is_ok();
+                        report.record_cleanup(
+                            DriverLifecycleStage::CloseHandles,
+                            scm_closed,
+                            format!("service_closed=false, scm_closed={}", scm_closed),
+                        );
+                        if report.failed_stage.is_some() {
+                            return Err(DriverLifecycleError::new(
+                                report.clone(),
+                                format!("Open service for unload: {}", e),
+                            ));
+                        }
+                        report.record(DriverLifecycleStage::Complete, true, "nothing to unload");
+                        return Ok(report);
+                    }
+                };
 
             let mut status = SERVICE_STATUS::default();
-            let _ = ControlService(service, SERVICE_CONTROL_STOP, &mut status);
+            match ControlService(service, SERVICE_CONTROL_STOP, &mut status) {
+                Ok(()) => report.record(DriverLifecycleStage::StopService, true, "stop requested"),
+                Err(e) => report.record(
+                    DriverLifecycleStage::StopService,
+                    true,
+                    format!("stop skipped or already stopped: {}", e),
+                ),
+            }
 
-            let _ = DeleteService(service);
+            match DeleteService(service) {
+                Ok(()) => {
+                    report.record(DriverLifecycleStage::DeleteService, true, "service deleted")
+                }
+                Err(e) => report.record(
+                    DriverLifecycleStage::DeleteService,
+                    true,
+                    format!("delete skipped or already deleted: {}", e),
+                ),
+            }
 
-            let _ = CloseHandle(HANDLE(service.0 as *mut _));
-            let _ = CloseHandle(HANDLE(sc_manager.0 as *mut _));
+            let service_closed = CloseServiceHandle(service).is_ok();
+            let scm_closed = CloseServiceHandle(sc_manager).is_ok();
+            report.record(
+                DriverLifecycleStage::CloseHandles,
+                service_closed && scm_closed,
+                format!(
+                    "service_closed={}, scm_closed={}",
+                    service_closed, scm_closed
+                ),
+            );
         }
 
         tracing::info!("[DRIVER] memoric driver unloaded");
-        Ok(())
+        report.record(
+            DriverLifecycleStage::Complete,
+            true,
+            "driver unload complete",
+        );
+        Ok(report)
     }
 
     // ================================================================
@@ -1719,6 +2349,11 @@ impl MemoricDriver {
     const RETRY_DELAY_MS: u64 = 50;
 
     fn ioctl(&self, code: u32, input: &[u8], output_size: usize) -> Result<Vec<u8>, MemoricError> {
+        #[cfg(test)]
+        if let Some(result) = test_ioctl_dispatch(code, input, output_size) {
+            return result;
+        }
+
         let mut last_err = None;
 
         for attempt in 0..Self::MAX_RETRIES {
@@ -1789,6 +2424,11 @@ impl MemoricDriver {
     }
 
     fn ioctl_no_output(&self, code: u32, input: &[u8]) -> Result<(), MemoricError> {
+        #[cfg(test)]
+        if let Some(result) = test_ioctl_dispatch(code, input, 0) {
+            return result.map(|_| ());
+        }
+
         let mut last_err = None;
 
         for attempt in 0..Self::MAX_RETRIES {
@@ -1838,6 +2478,33 @@ impl MemoricDriver {
             code,
             Self::MAX_RETRIES,
             last_err.map(|e| e.to_string()).unwrap_or_default()
+        )))
+    }
+
+    fn validate_capabilities(&self) -> Result<DriverCapabilities, MemoricError> {
+        let capabilities = match self.capabilities() {
+            Ok(capabilities) => capabilities,
+            Err(err) if allow_unsupported_driver() => {
+                tracing::warn!(
+                    "[DRIVER] Capability handshake failed but {} is enabled: {}",
+                    MEMORIC_DRIVER_OVERRIDE_ENV,
+                    err
+                );
+                return Ok(DriverCapabilities::unsupported_placeholder());
+            }
+            Err(err) => return Err(err),
+        };
+        if capabilities.is_supported() || allow_unsupported_driver() {
+            return Ok(capabilities);
+        }
+
+        Err(MemoricError::WindowsApi(format!(
+            "Unsupported memoric.sys driver: abi={} version={} required_abi={} required_version={}. Set {}=1 to override.",
+            capabilities.abi_version,
+            capabilities.version_string(),
+            MEMORIC_ABI_VERSION,
+            format_driver_version(MEMORIC_DRIVER_VERSION),
+            MEMORIC_DRIVER_OVERRIDE_ENV
         )))
     }
 
@@ -2768,6 +3435,28 @@ impl MemoricDriver {
             ));
         }
         Ok(unsafe { *(output.as_ptr() as *const DriverStatsResponse) })
+    }
+
+    /// Query driver ABI version and supported feature bitmap.
+    pub fn capabilities(&self) -> Result<DriverCapabilities, MemoricError> {
+        let output = self.ioctl(
+            IOCTL_MEMORIC_CAPABILITIES,
+            &[],
+            std::mem::size_of::<DriverCapabilities>(),
+        )?;
+        if output.len() < std::mem::size_of::<DriverCapabilities>() {
+            return Err(MemoricError::WindowsApi(
+                "Incomplete driver capabilities response".to_string(),
+            ));
+        }
+        let capabilities = unsafe { *(output.as_ptr() as *const DriverCapabilities) };
+        if capabilities.size as usize != std::mem::size_of::<DriverCapabilities>() {
+            return Err(MemoricError::WindowsApi(format!(
+                "Unexpected driver capabilities size: {}",
+                capabilities.size
+            )));
+        }
+        Ok(capabilities)
     }
 
     /// Query kernel pool allocations by tag
@@ -3942,5 +4631,676 @@ impl Drop for MemoricDriver {
                 let _ = CloseHandle(self.handle);
             }
         }
+    }
+}
+
+fn allow_unsupported_driver() -> bool {
+    std::env::var(MEMORIC_DRIVER_OVERRIDE_ENV)
+        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+fn format_driver_version(version: u32) -> String {
+    format!("{}.{}", version >> 16, version & 0xFFFF)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    const DRIVER_HEADER: &str = include_str!("../driver/memoric.h");
+    const DRIVER_SOURCE: &str = include_str!("driver.rs");
+
+    struct InstalledMock;
+
+    impl Drop for InstalledMock {
+        fn drop(&mut self) {
+            TEST_IOCTL_MOCK.with(|mock| {
+                *mock.borrow_mut() = None;
+            });
+        }
+    }
+
+    fn with_mock_driver<R>(
+        expectations: Vec<TestIoctlExpectation>,
+        run: impl FnOnce(&MemoricDriver) -> R,
+    ) -> R {
+        TEST_IOCTL_MOCK.with(|mock| {
+            let mut slot = mock.borrow_mut();
+            assert!(
+                slot.is_none(),
+                "mock DeviceIoControl state leaked from a previous test"
+            );
+            *slot = Some(TestIoctlMock::new(expectations));
+        });
+
+        let guard = InstalledMock;
+        let driver = MemoricDriver {
+            handle: HANDLE::default(),
+        };
+        let result = run(&driver);
+
+        TEST_IOCTL_MOCK.with(|mock| {
+            let slot = mock.borrow();
+            let mock = slot
+                .as_ref()
+                .expect("mock DeviceIoControl was cleared early");
+            assert_eq!(
+                mock.expected.len(),
+                0,
+                "mock DeviceIoControl expectations were not fully consumed: {:?}",
+                mock.expected
+            );
+        });
+
+        drop(guard);
+        result
+    }
+
+    #[test]
+    fn ioctl_constants_match_driver_header() {
+        let header = parse_header_ioctl_codes();
+        let rust = rust_ioctl_codes();
+
+        assert_eq!(
+            header.len(),
+            rust.len(),
+            "driver/memoric.h and src/driver.rs expose different IOCTL counts"
+        );
+        assert_eq!(header, rust, "Rust IOCTL constants drifted from memoric.h");
+    }
+
+    #[test]
+    fn ioctl_constants_are_used_by_wrappers() {
+        let source_before_tests = DRIVER_SOURCE
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("source before test module");
+        let mut unused = Vec::new();
+
+        for (name, _) in rust_ioctl_codes() {
+            let occurrences = source_before_tests.matches(name.as_str()).count();
+            if occurrences < 2 {
+                unused.push(name);
+            }
+        }
+
+        assert!(
+            unused.is_empty(),
+            "IOCTL constants are declared but not used by wrapper code: {:?}",
+            unused
+        );
+    }
+
+    #[test]
+    fn critical_struct_layouts_match_header_contract() {
+        assert_size::<PhysRequest>("MEMORIC_PHYS_REQUEST", 16);
+        assert_size::<PhysWriteRequest>("MEMORIC_PHYS_WRITE_REQUEST", 16);
+        assert_size::<VirtRequest>("MEMORIC_VIRT_REQUEST", 16);
+        assert_size::<VirtWriteRequest>("MEMORIC_VIRT_WRITE_REQUEST", 16);
+        assert_size::<Cr3Request>("MEMORIC_CR3_REQUEST", 8);
+        assert_size::<Cr3Response>("MEMORIC_CR3_RESPONSE", 16);
+        assert_size::<EprocessRequest>("MEMORIC_EPROCESS_REQUEST", 8);
+        assert_size::<EprocessInfo>("MEMORIC_EPROCESS_RESPONSE", 72);
+        assert_size::<TokenRequest>("MEMORIC_TOKEN_REQUEST", 8);
+        assert_size::<HideRequest>("MEMORIC_HIDE_REQUEST", 8);
+        assert_size::<PplRequest>("MEMORIC_PPL_REQUEST", 8);
+        assert_size::<KernelWriteRequest>("MEMORIC_KERNEL_WRITE_REQUEST", 16);
+        assert_size::<Va2PaRequest>("MEMORIC_VA2PA_REQUEST", 16);
+        assert_size::<Va2PaResponse>("MEMORIC_VA2PA_RESPONSE", 8);
+        assert_size::<ProcessEntry>("MEMORIC_PROCESS_ENTRY", 56);
+        assert_size::<EnumProcessRequest>("MEMORIC_ENUM_PROCESS_REQUEST", 8);
+        assert_size::<DriverCapabilities>("MEMORIC_CAPABILITIES_RESPONSE", 48);
+        assert_size::<DriverStatsResponse>("MEMORIC_DRIVER_STATS", 64);
+        assert_size::<ProcessDumpRequest>("MEMORIC_PROCESS_DUMP_REQUEST", 24);
+        assert_size::<HypervisorDetectResponse>("MEMORIC_HYPERVISOR_DETECT_RESPONSE", 48);
+        assert_size::<InfinityHookResponse>("MEMORIC_INFINITY_HOOK_RESPONSE", 32);
+    }
+
+    #[test]
+    fn driver_capability_contract_matches_header() {
+        let macros = parse_header_macro_values();
+        assert_eq!(macros["MEMORIC_ABI_VERSION"], MEMORIC_ABI_VERSION as u64);
+        assert_eq!(
+            macros["MEMORIC_DRIVER_VERSION"],
+            MEMORIC_DRIVER_VERSION as u64
+        );
+
+        let response = DriverCapabilities {
+            size: std::mem::size_of::<DriverCapabilities>() as u32,
+            abi_version: MEMORIC_ABI_VERSION,
+            driver_version: MEMORIC_DRIVER_VERSION,
+            build_number: 26100,
+            max_io_size: MEMORIC_MAX_IO_SIZE as u32,
+            max_force_write: MEMORIC_MAX_FORCE_WRITE as u32,
+            offsets_resolved: 1,
+            reserved: 0,
+            capability_flags: MEMORIC_CAP_PHYSICAL_MEMORY | MEMORIC_CAP_VIRTUAL_MEMORY,
+            capability_flags2: 0,
+        };
+
+        assert!(response.is_supported());
+        assert!(response.supports(MEMORIC_CAP_PHYSICAL_MEMORY));
+        assert!(response.supports(MEMORIC_CAP_VIRTUAL_MEMORY));
+        assert!(!response.supports(MEMORIC_CAP_PROCESS_ENUM));
+        assert_eq!(response.version_string(), "1.1");
+
+        let unsupported = DriverCapabilities::unsupported_placeholder();
+        assert!(!unsupported.is_supported());
+        assert!(!unsupported.supports(MEMORIC_CAP_PHYSICAL_MEMORY));
+    }
+
+    #[test]
+    fn driver_capabilities_and_stats_report_kernel_offset_profile() {
+        let capabilities = DriverCapabilities {
+            size: std::mem::size_of::<DriverCapabilities>() as u32,
+            abi_version: MEMORIC_ABI_VERSION,
+            driver_version: MEMORIC_DRIVER_VERSION,
+            build_number: 26100,
+            max_io_size: MEMORIC_MAX_IO_SIZE as u32,
+            max_force_write: MEMORIC_MAX_FORCE_WRITE as u32,
+            offsets_resolved: 1,
+            reserved: 0,
+            capability_flags: MEMORIC_CAP_PHYSICAL_MEMORY,
+            capability_flags2: 0,
+        };
+        let capability_profile = capabilities.offset_profile_json();
+        assert_eq!(capability_profile["known_build"], true);
+        assert_eq!(
+            capability_profile["eprocess"]["confidence"],
+            "runtime_verified"
+        );
+        assert_eq!(
+            capability_profile["callback_offsets"]["confidence"],
+            "exact"
+        );
+
+        let stats = DriverStatsResponse {
+            total_ioctls: 1,
+            success_ioctls: 1,
+            failed_ioctls: 0,
+            exception_count: 0,
+            open_handles: 1,
+            build_number: 99999,
+            driver_version: MEMORIC_DRIVER_VERSION,
+            offsets_resolved: 0,
+            notify_process_active: 0,
+            notify_thread_active: 0,
+            notify_image_active: 0,
+            reg_callback_active: 0,
+            ob_callback_active: 0,
+            dpc_timers_active: 0,
+            hidden_port_count: 0,
+            protected_key_count: 0,
+        };
+        let stats_profile = stats.offset_profile_json();
+        assert_eq!(stats_profile["known_build"], false);
+        assert_eq!(stats_profile["eprocess"]["confidence"], "unknown");
+        assert_eq!(stats_profile["callback_offsets"]["confidence"], "unknown");
+    }
+
+    #[test]
+    fn eprocess_info_reports_runtime_offset_snapshot_profile() {
+        let info = EprocessInfo {
+            eprocess_address: 0xFFFF_8000_0000_1000,
+            token: 0xFFFF_8000_0000_2000,
+            directory_table_base: 0x1234_5000,
+            unique_process_id: 4,
+            unique_process_id_off: 0x440,
+            active_process_links_off: 0x448,
+            token_off: 0x4B8,
+            protection_off: 0x87A,
+            image_file_name_off: 0x5A8,
+            vad_root_off: 0x7D8,
+            image_file_name: [0; 16],
+        };
+
+        let profile = info.offset_profile_json(26100, true);
+
+        assert_eq!(profile["source"], "driver_eprocess_response");
+        assert_eq!(profile["confidence"], "runtime_verified");
+        assert_eq!(profile["resolved_fields"], 6);
+        assert_eq!(profile["fields"]["token"], "0x4B8");
+    }
+
+    #[test]
+    fn driver_lifecycle_report_json_captures_stage_cleanup_and_first_failure() {
+        let mut report =
+            DriverLifecycleReport::new("load").with_driver_path("C:\\temp\\memoric.sys");
+
+        report.record(DriverLifecycleStage::CopyDriverFile, true, "copied");
+        report.record(DriverLifecycleStage::StartService, false, "start failed");
+        report.record(
+            DriverLifecycleStage::OpenDevice,
+            false,
+            "device unavailable",
+        );
+        report.record_cleanup(DriverLifecycleStage::CloseHandles, true, "closed");
+
+        assert_eq!(
+            report.failed_stage,
+            Some(DriverLifecycleStage::StartService)
+        );
+
+        let lifecycle = report.to_json();
+        assert_eq!(lifecycle["operation"], "load");
+        assert_eq!(lifecycle["service_name"], SERVICE_NAME);
+        assert_eq!(lifecycle["driver_path"], "C:\\temp\\memoric.sys");
+        assert_eq!(lifecycle["failed_stage"], "start_service");
+        assert_eq!(lifecycle["steps"].as_array().unwrap().len(), 3);
+        assert_eq!(lifecycle["cleanup"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            lifecycle["cleanup"][0]["stage"],
+            DriverLifecycleStage::CloseHandles.as_str()
+        );
+    }
+
+    #[test]
+    fn driver_lifecycle_recoverable_failure_does_not_set_failed_stage() {
+        let mut report = DriverLifecycleReport::new("load");
+
+        report.record_recoverable_failure(
+            DriverLifecycleStage::CreateService,
+            "service already exists",
+        );
+        report.record(
+            DriverLifecycleStage::OpenExistingService,
+            true,
+            "opened existing",
+        );
+
+        assert_eq!(report.failed_stage, None);
+
+        let lifecycle = report.to_json();
+        assert_eq!(lifecycle["failed_stage"], Value::Null);
+        assert_eq!(lifecycle["steps"][0]["stage"], "create_service");
+        assert_eq!(lifecycle["steps"][0]["success"], false);
+        assert_eq!(lifecycle["steps"][1]["stage"], "open_existing_service");
+        assert_eq!(lifecycle["steps"][1]["success"], true);
+    }
+
+    #[test]
+    fn driver_service_error_matching_accepts_hresult_from_win32() {
+        assert_eq!(hresult_from_win32(0), 0);
+        assert_eq!(hresult_from_win32(1056), 0x8007_0420);
+        assert_eq!(
+            hresult_from_win32(WIN32_ERROR_SERVICE_DOES_NOT_EXIST),
+            0x8007_0424
+        );
+    }
+
+    #[test]
+    fn response_parsing_layouts_are_plain_repr_c_copies() {
+        let cr3 = Cr3Response {
+            cr3_value: 0x1122_3344_5566_7788,
+            eprocess_address: 0x8877_6655_4433_2211,
+        };
+        let bytes = as_bytes(&cr3);
+        assert_eq!(bytes.len(), std::mem::size_of::<Cr3Response>());
+        let parsed = unsafe { *(bytes.as_ptr() as *const Cr3Response) };
+        assert_eq!(parsed.cr3_value, cr3.cr3_value);
+        assert_eq!(parsed.eprocess_address, cr3.eprocess_address);
+
+        let va = Va2PaResponse {
+            physical_address: 0xAA55_AA55_0011_2233,
+        };
+        let bytes = as_bytes(&va);
+        assert_eq!(bytes.len(), std::mem::size_of::<Va2PaResponse>());
+        let parsed = unsafe { *(bytes.as_ptr() as *const Va2PaResponse) };
+        assert_eq!(parsed.physical_address, va.physical_address);
+    }
+
+    #[test]
+    fn mocked_deviceiocontrol_validates_virtual_read_and_write_contracts() {
+        let read_req = VirtRequest {
+            process_id: 4242,
+            size: 4,
+            address: 0x1122_3344_5566_7788,
+        };
+        let write_header = VirtWriteRequest {
+            process_id: 4242,
+            size: 3,
+            address: 0x8877_6655_4433_2211,
+        };
+        let mut write_input = as_bytes(&write_header).to_vec();
+        write_input.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
+
+        with_mock_driver(
+            vec![
+                TestIoctlExpectation::new(
+                    IOCTL_MEMORIC_VIRT_READ,
+                    as_bytes(&read_req).to_vec(),
+                    4,
+                    vec![0x10, 0x20, 0x30, 0x40],
+                ),
+                TestIoctlExpectation::new(IOCTL_MEMORIC_VIRT_WRITE, write_input, 0, Vec::new()),
+            ],
+            |driver| {
+                let data = driver
+                    .read_virtual(
+                        read_req.process_id,
+                        read_req.address,
+                        read_req.size as usize,
+                    )
+                    .expect("mocked virtual read should succeed");
+                assert_eq!(data, vec![0x10, 0x20, 0x30, 0x40]);
+
+                let written = driver
+                    .write_virtual(
+                        write_header.process_id,
+                        write_header.address,
+                        &[0xAA, 0xBB, 0xCC],
+                    )
+                    .expect("mocked virtual write should succeed");
+                assert_eq!(written, 3);
+            },
+        );
+    }
+
+    #[test]
+    fn mocked_deviceiocontrol_validates_structured_response_contracts() {
+        let cr3_req = Cr3Request {
+            process_id: 1337,
+            reserved: 0,
+        };
+        let cr3_resp = Cr3Response {
+            cr3_value: 0x1234_5000,
+            eprocess_address: 0xFFFF_8000_1111_2222,
+        };
+        let caps = DriverCapabilities {
+            size: std::mem::size_of::<DriverCapabilities>() as u32,
+            abi_version: MEMORIC_ABI_VERSION,
+            driver_version: MEMORIC_DRIVER_VERSION,
+            build_number: 26100,
+            max_io_size: MEMORIC_MAX_IO_SIZE as u32,
+            max_force_write: MEMORIC_MAX_FORCE_WRITE as u32,
+            offsets_resolved: 1,
+            reserved: 0,
+            capability_flags: MEMORIC_CAP_PHYSICAL_MEMORY | MEMORIC_CAP_PROCESS_INFO,
+            capability_flags2: 0,
+        };
+
+        with_mock_driver(
+            vec![
+                TestIoctlExpectation::new(
+                    IOCTL_MEMORIC_GET_CR3,
+                    as_bytes(&cr3_req).to_vec(),
+                    std::mem::size_of::<Cr3Response>(),
+                    as_bytes(&cr3_resp).to_vec(),
+                ),
+                TestIoctlExpectation::new(
+                    IOCTL_MEMORIC_CAPABILITIES,
+                    Vec::new(),
+                    std::mem::size_of::<DriverCapabilities>(),
+                    as_bytes(&caps).to_vec(),
+                ),
+            ],
+            |driver| {
+                let parsed_cr3 = driver
+                    .get_cr3(cr3_req.process_id)
+                    .expect("mocked CR3 query should succeed");
+                assert_eq!(parsed_cr3.cr3_value, cr3_resp.cr3_value);
+                assert_eq!(parsed_cr3.eprocess_address, cr3_resp.eprocess_address);
+
+                let parsed_caps = driver
+                    .capabilities()
+                    .expect("mocked capabilities query should succeed");
+                assert!(parsed_caps.is_supported());
+                assert!(parsed_caps.supports(MEMORIC_CAP_PHYSICAL_MEMORY));
+                assert!(parsed_caps.supports(MEMORIC_CAP_PROCESS_INFO));
+            },
+        );
+    }
+
+    #[test]
+    fn mocked_deviceiocontrol_rejects_incomplete_structured_responses() {
+        let req = Cr3Request {
+            process_id: 99,
+            reserved: 0,
+        };
+
+        with_mock_driver(
+            vec![TestIoctlExpectation::new(
+                IOCTL_MEMORIC_GET_CR3,
+                as_bytes(&req).to_vec(),
+                std::mem::size_of::<Cr3Response>(),
+                vec![0xAA; std::mem::size_of::<Cr3Response>() - 1],
+            )],
+            |driver| {
+                let err = driver
+                    .get_cr3(req.process_id)
+                    .expect_err("short CR3 response should be rejected");
+                assert!(
+                    err.to_string().contains("Incomplete CR3 response"),
+                    "unexpected error: {err}"
+                );
+            },
+        );
+    }
+
+    fn assert_size<T>(header_name: &str, expected: usize) {
+        assert_eq!(
+            std::mem::size_of::<T>(),
+            expected,
+            "{} Rust layout does not match expected header size",
+            header_name
+        );
+    }
+
+    fn as_bytes<T>(value: &T) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>())
+        }
+    }
+
+    fn rust_ioctl_codes() -> BTreeMap<String, u32> {
+        [
+            ("IOCTL_MEMORIC_PHYS_READ", IOCTL_MEMORIC_PHYS_READ),
+            ("IOCTL_MEMORIC_PHYS_WRITE", IOCTL_MEMORIC_PHYS_WRITE),
+            ("IOCTL_MEMORIC_VIRT_READ", IOCTL_MEMORIC_VIRT_READ),
+            ("IOCTL_MEMORIC_VIRT_WRITE", IOCTL_MEMORIC_VIRT_WRITE),
+            ("IOCTL_MEMORIC_GET_CR3", IOCTL_MEMORIC_GET_CR3),
+            ("IOCTL_MEMORIC_GET_EPROCESS", IOCTL_MEMORIC_GET_EPROCESS),
+            ("IOCTL_MEMORIC_TOKEN_STEAL", IOCTL_MEMORIC_TOKEN_STEAL),
+            ("IOCTL_MEMORIC_DKOM_HIDE", IOCTL_MEMORIC_DKOM_HIDE),
+            ("IOCTL_MEMORIC_PPL_REMOVE", IOCTL_MEMORIC_PPL_REMOVE),
+            ("IOCTL_MEMORIC_WRITE_KERNEL", IOCTL_MEMORIC_WRITE_KERNEL),
+            ("IOCTL_MEMORIC_VA_TO_PA", IOCTL_MEMORIC_VA_TO_PA),
+            ("IOCTL_MEMORIC_ENUM_PROCESS", IOCTL_MEMORIC_ENUM_PROCESS),
+            ("IOCTL_MEMORIC_MODULE_HIDE", IOCTL_MEMORIC_MODULE_HIDE),
+            ("IOCTL_MEMORIC_THREAD_HIDE", IOCTL_MEMORIC_THREAD_HIDE),
+            ("IOCTL_MEMORIC_CALLBACK_ENUM", IOCTL_MEMORIC_CALLBACK_ENUM),
+            (
+                "IOCTL_MEMORIC_CALLBACK_REMOVE",
+                IOCTL_MEMORIC_CALLBACK_REMOVE,
+            ),
+            ("IOCTL_MEMORIC_PATCH_KERNEL", IOCTL_MEMORIC_PATCH_KERNEL),
+            ("IOCTL_MEMORIC_APC_INJECT", IOCTL_MEMORIC_APC_INJECT),
+            ("IOCTL_MEMORIC_HANDLE_STRIP", IOCTL_MEMORIC_HANDLE_STRIP),
+            ("IOCTL_MEMORIC_REG_PROTECT", IOCTL_MEMORIC_REG_PROTECT),
+            ("IOCTL_MEMORIC_NOTIFY_ROUTINE", IOCTL_MEMORIC_NOTIFY_ROUTINE),
+            ("IOCTL_MEMORIC_PE_DUMP", IOCTL_MEMORIC_PE_DUMP),
+            ("IOCTL_MEMORIC_SET_DEBUG_PORT", IOCTL_MEMORIC_SET_DEBUG_PORT),
+            ("IOCTL_MEMORIC_DPC_TIMER", IOCTL_MEMORIC_DPC_TIMER),
+            ("IOCTL_MEMORIC_PORT_HIDE", IOCTL_MEMORIC_PORT_HIDE),
+            ("IOCTL_MEMORIC_TOKEN_DUP", IOCTL_MEMORIC_TOKEN_DUP),
+            ("IOCTL_MEMORIC_OBJECT_HOOK", IOCTL_MEMORIC_OBJECT_HOOK),
+            ("IOCTL_MEMORIC_DRIVER_STATS", IOCTL_MEMORIC_DRIVER_STATS),
+            ("IOCTL_MEMORIC_MEMORY_POOL", IOCTL_MEMORIC_MEMORY_POOL),
+            (
+                "IOCTL_MEMORIC_MINIFILTER_ENUM",
+                IOCTL_MEMORIC_MINIFILTER_ENUM,
+            ),
+            ("IOCTL_MEMORIC_PROCESS_DUMP", IOCTL_MEMORIC_PROCESS_DUMP),
+            (
+                "IOCTL_MEMORIC_HYPERVISOR_DETECT",
+                IOCTL_MEMORIC_HYPERVISOR_DETECT,
+            ),
+            ("IOCTL_MEMORIC_TESTSIGN_HIDE", IOCTL_MEMORIC_TESTSIGN_HIDE),
+            ("IOCTL_MEMORIC_GLOBAL_HOOK", IOCTL_MEMORIC_GLOBAL_HOOK),
+            ("IOCTL_MEMORIC_AUTO_INJECT", IOCTL_MEMORIC_AUTO_INJECT),
+            ("IOCTL_MEMORIC_INFINITY_HOOK", IOCTL_MEMORIC_INFINITY_HOOK),
+            (
+                "IOCTL_MEMORIC_GET_MODULE_BASE",
+                IOCTL_MEMORIC_GET_MODULE_BASE,
+            ),
+            (
+                "IOCTL_MEMORIC_CI_CALLBACK_PATCH",
+                IOCTL_MEMORIC_CI_CALLBACK_PATCH,
+            ),
+            ("IOCTL_MEMORIC_CI_FUNC_PATCH", IOCTL_MEMORIC_CI_FUNC_PATCH),
+            ("IOCTL_MEMORIC_PTE_RW", IOCTL_MEMORIC_PTE_RW),
+            ("IOCTL_MEMORIC_MSR_RW", IOCTL_MEMORIC_MSR_RW),
+            ("IOCTL_MEMORIC_DRIVER_CLOAK", IOCTL_MEMORIC_DRIVER_CLOAK),
+            ("IOCTL_MEMORIC_FORCE_KILL", IOCTL_MEMORIC_FORCE_KILL),
+            ("IOCTL_MEMORIC_FORCE_DELETE", IOCTL_MEMORIC_FORCE_DELETE),
+            ("IOCTL_MEMORIC_SYSTEM_THREAD", IOCTL_MEMORIC_SYSTEM_THREAD),
+            ("IOCTL_MEMORIC_KERNEL_EXEC", IOCTL_MEMORIC_KERNEL_EXEC),
+            ("IOCTL_MEMORIC_PPL_BYPASS", IOCTL_MEMORIC_PPL_BYPASS),
+            ("IOCTL_MEMORIC_CR_RW", IOCTL_MEMORIC_CR_RW),
+            ("IOCTL_MEMORIC_IDT_RW", IOCTL_MEMORIC_IDT_RW),
+            (
+                "IOCTL_MEMORIC_UNLOADED_DRV_CLEAR",
+                IOCTL_MEMORIC_UNLOADED_DRV_CLEAR,
+            ),
+            ("IOCTL_MEMORIC_TOKEN_SWAP", IOCTL_MEMORIC_TOKEN_SWAP),
+            (
+                "IOCTL_MEMORIC_PROCESS_PROTECT",
+                IOCTL_MEMORIC_PROCESS_PROTECT,
+            ),
+            ("IOCTL_MEMORIC_KEYLOGGER", IOCTL_MEMORIC_KEYLOGGER),
+            ("IOCTL_MEMORIC_REG_HIDE", IOCTL_MEMORIC_REG_HIDE),
+            ("IOCTL_MEMORIC_FILE_LOCK", IOCTL_MEMORIC_FILE_LOCK),
+            ("IOCTL_MEMORIC_ETW_BLIND", IOCTL_MEMORIC_ETW_BLIND),
+            ("IOCTL_MEMORIC_EPROCESS_SPOOF", IOCTL_MEMORIC_EPROCESS_SPOOF),
+            (
+                "IOCTL_MEMORIC_EVENT_LOG_CLEAR",
+                IOCTL_MEMORIC_EVENT_LOG_CLEAR,
+            ),
+            ("IOCTL_MEMORIC_CRED_DUMP", IOCTL_MEMORIC_CRED_DUMP),
+            (
+                "IOCTL_MEMORIC_DRIVER_IMPERSONATE",
+                IOCTL_MEMORIC_DRIVER_IMPERSONATE,
+            ),
+            ("IOCTL_MEMORIC_CALLBACK_NUKE", IOCTL_MEMORIC_CALLBACK_NUKE),
+            (
+                "IOCTL_MEMORIC_MINIFILTER_DETACH",
+                IOCTL_MEMORIC_MINIFILTER_DETACH,
+            ),
+            (
+                "IOCTL_MEMORIC_KERNEL_APC_INJECT",
+                IOCTL_MEMORIC_KERNEL_APC_INJECT,
+            ),
+            ("IOCTL_MEMORIC_WFP_REMOVE", IOCTL_MEMORIC_WFP_REMOVE),
+            ("IOCTL_MEMORIC_CAPABILITIES", IOCTL_MEMORIC_CAPABILITIES),
+        ]
+        .into_iter()
+        .map(|(name, code)| (name.to_string(), code))
+        .collect()
+    }
+
+    fn parse_header_ioctl_codes() -> BTreeMap<String, u32> {
+        let mut codes = BTreeMap::new();
+        let mut names = BTreeSet::new();
+        let device_type = 0x8000u32;
+        let method_buffered = 0u32;
+        let file_any_access = 0u32;
+
+        for line in DRIVER_HEADER.lines() {
+            let trimmed = line.trim();
+            if !trimmed.starts_with("#define IOCTL_MEMORIC_") {
+                continue;
+            }
+            let mut parts = trimmed.split_whitespace();
+            let _define = parts.next();
+            let Some(name) = parts.next() else {
+                continue;
+            };
+            if !names.insert(name.to_string()) {
+                panic!("duplicate IOCTL definition in header: {}", name);
+            }
+
+            let function = parse_ctl_code_function(trimmed)
+                .unwrap_or_else(|| panic!("unable to parse CTL_CODE function for {}", name));
+            let expected_from_comment = parse_trailing_hex_comment(trimmed)
+                .unwrap_or_else(|| panic!("missing trailing hex comment for {}", name));
+            let computed = ctl_code(device_type, function, method_buffered, file_any_access);
+            assert_eq!(
+                computed, expected_from_comment,
+                "{} CTL_CODE calculation does not match header comment",
+                name
+            );
+            codes.insert(name.to_string(), computed);
+        }
+
+        codes
+    }
+
+    fn ctl_code(device_type: u32, function: u32, method: u32, access: u32) -> u32 {
+        (device_type << 16) | (access << 14) | (function << 2) | method
+    }
+
+    fn parse_ctl_code_function(line: &str) -> Option<u32> {
+        let start = line.find("CTL_CODE(")? + "CTL_CODE(".len();
+        let end = line[start..].find(')')? + start;
+        let args = line[start..end]
+            .split(',')
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        let function = *args.get(1)?;
+        parse_hex_u32(function)
+    }
+
+    fn parse_trailing_hex_comment(line: &str) -> Option<u32> {
+        let start = line.find("/*")?;
+        let end = line[start + 2..].find("*/")? + start + 2;
+        parse_hex_u32(line[start + 2..end].trim())
+    }
+
+    fn parse_hex_u32(value: &str) -> Option<u32> {
+        let hex = value
+            .strip_prefix("0x")
+            .or_else(|| value.strip_prefix("0X"))?;
+        u32::from_str_radix(hex, 16).ok()
+    }
+
+    fn parse_header_macro_values() -> BTreeMap<String, u64> {
+        let mut values = BTreeMap::new();
+        let mut major = None;
+        let mut minor = None;
+
+        for line in DRIVER_HEADER.lines() {
+            let trimmed = line.trim();
+            if !trimmed.starts_with("#define MEMORIC_") {
+                continue;
+            }
+            let mut parts = trimmed.split_whitespace();
+            let _define = parts.next();
+            let Some(name) = parts.next() else {
+                continue;
+            };
+            let Some(value) = parts.next() else {
+                continue;
+            };
+            let parsed = if value.starts_with("0x") || value.starts_with("0X") {
+                u64::from_str_radix(&value[2..], 16).ok()
+            } else {
+                value.parse::<u64>().ok()
+            };
+            if let Some(parsed) = parsed {
+                values.insert(name.to_string(), parsed);
+                if name == "MEMORIC_DRIVER_VERSION_MAJOR" {
+                    major = Some(parsed);
+                } else if name == "MEMORIC_DRIVER_VERSION_MINOR" {
+                    minor = Some(parsed);
+                }
+            }
+        }
+
+        if let (Some(major), Some(minor)) = (major, minor) {
+            values.insert("MEMORIC_DRIVER_VERSION".to_string(), (major << 16) | minor);
+        }
+        values
     }
 }

@@ -334,15 +334,107 @@ pub fn extract_kerberos_tickets(args: &Value) -> Result<Value, MemoricError> {
         let tgt_count = tickets.iter().filter(|t| t["type"] == "TGT").count();
         let st_count = tickets.iter().filter(|t| t["type"] == "ST").count();
 
-        Ok(serde_json::json!({
+        let artifact = export_kerberos_tickets_artifact(args, &tickets)?;
+        let inline_tickets = artifact.is_none();
+
+        let mut result = serde_json::json!({
             "success": true,
             "ticket_count": tickets.len(),
             "tgt_count": tgt_count,
             "st_count": st_count,
-            "tickets": tickets,
+            "tickets": if inline_tickets { Value::Array(tickets.clone()) } else { Value::Array(Vec::new()) },
+            "redaction_status": if inline_tickets { "inline" } else { "artifact" },
             "message": format!("Extracted {} tickets ({} TGTs, {} STs) from Kerberos cache", tickets.len(), tgt_count, st_count),
             "note": "Tickets are in the LSA cache — use Rubeus or Mimikatz to export them as .kirbi files for pass-the-ticket."
-        }))
+        });
+        if let Some(artifact) = artifact {
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert("artifact".to_string(), artifact.clone());
+                obj.insert(
+                    "output_path".to_string(),
+                    serde_json::json!(artifact["path"].as_str().unwrap_or_default()),
+                );
+            }
+        }
+        Ok(result)
+    }
+}
+
+fn export_kerberos_tickets_artifact(
+    args: &Value,
+    tickets: &[Value],
+) -> Result<Option<Value>, MemoricError> {
+    let Some(path) = args
+        .get("output_path")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return Ok(None);
+    };
+
+    let payload = serde_json::json!({
+        "kind": "kerberos-ticket-cache",
+        "ticket_count": tickets.len(),
+        "tickets": tickets,
+        "redaction_status": "artifact"
+    });
+    let bytes = serde_json::to_vec_pretty(&payload)
+        .map_err(|e| MemoricError::Other(format!("serialize kerberos ticket artifact: {}", e)))?;
+    let correlation_id = crate::observability::correlation_id_from_args(args);
+    crate::artifact::write_artifact_bytes(
+        path,
+        &bytes,
+        crate::artifact::retention_secs_from_args(args),
+        correlation_id.as_deref(),
+    )
+    .map(Some)
+    .map_err(|e| MemoricError::Other(format!("write kerberos ticket artifact: {}", e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::export_kerberos_tickets_artifact;
+    use serde_json::json;
+
+    #[test]
+    fn kerberos_ticket_export_writes_artifact_json() {
+        let output_path = std::env::temp_dir().join(format!(
+            "memoric-kerberos-tickets-{}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&output_path);
+        let tickets = vec![json!({
+            "type": "TGT",
+            "server": "krbtgt/example.test",
+            "realm": "EXAMPLE.TEST"
+        })];
+
+        let artifact = export_kerberos_tickets_artifact(
+            &json!({
+                "output_path": output_path.display().to_string(),
+                "artifact_retention_secs": 60,
+                "request_id": "kerberos-artifact-test"
+            }),
+            &tickets,
+        )
+        .expect("export tickets")
+        .expect("artifact");
+
+        assert_eq!(artifact["size_bytes"].as_u64().unwrap() > 0, true);
+        assert!(artifact["sha256"].as_str().is_some());
+        let uri = artifact["uri"].as_str().expect("artifact uri");
+        assert!(crate::artifact::is_artifact_uri(uri));
+
+        let exported: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&output_path).expect("ticket artifact"))
+                .expect("ticket artifact json");
+        assert_eq!(exported["kind"], "kerberos-ticket-cache");
+        assert_eq!(exported["ticket_count"], 1);
+        assert_eq!(exported["redaction_status"], "artifact");
+
+        let _ = crate::artifact::forget(uri);
+        let _ = std::fs::remove_file(output_path);
     }
 }
 

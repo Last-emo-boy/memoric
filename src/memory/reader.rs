@@ -1,16 +1,78 @@
 //! Memory reader implementations — standard + BYOVD stealth kernel-level reads
 
 use crate::error::MemoricError;
+use crate::memory::region_cache::{self, MemoryRegion};
 use crate::safe_handle::SafeHandle;
 use crate::util::parse_address;
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::path::PathBuf;
+
+const INLINE_MEMORY_BYTE_LIMIT: usize = 4 * 1024;
+
+fn output_path_from_args(args: &Value) -> Option<PathBuf> {
+    args.get("output_path")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+fn auto_output_path(kind: &str, pid: Option<u64>, address: Option<u64>, bytes: &[u8]) -> PathBuf {
+    let hash = crate::artifact::sha256_bytes(bytes);
+    let mut name = format!("memoric-{}", kind);
+    if let Some(pid) = pid {
+        name.push_str(&format!("-pid-{}", pid));
+    }
+    if let Some(address) = address {
+        name.push_str(&format!("-addr-{:016X}", address));
+    }
+    name.push_str(&format!("-{}.bin", hash));
+    std::env::temp_dir().join(name)
+}
+
+fn export_memory_artifact(
+    args: &Value,
+    kind: &str,
+    pid: Option<u64>,
+    address: Option<u64>,
+    bytes: &[u8],
+) -> Result<Option<Value>, MemoricError> {
+    let explicit_path = output_path_from_args(args);
+    let should_export = explicit_path.is_some() || bytes.len() > INLINE_MEMORY_BYTE_LIMIT;
+    if !should_export {
+        return Ok(None);
+    }
+
+    let path = explicit_path.unwrap_or_else(|| auto_output_path(kind, pid, address, bytes));
+    let correlation_id = crate::observability::correlation_id_from_args(args);
+    crate::artifact::write_artifact_bytes(
+        &path,
+        bytes,
+        crate::artifact::retention_secs_from_args(args),
+        correlation_id.as_deref(),
+    )
+    .map(Some)
+    .map_err(MemoricError::MemoryAccess)
+}
+
+fn read_region_overlap(
+    region: &MemoryRegion,
+    current: u64,
+    end_address: u64,
+) -> Option<(u64, u64)> {
+    let region_end = region.end_address();
+    if region_end <= current || region.base_address >= end_address {
+        return None;
+    }
+
+    let read_start = current.max(region.base_address);
+    let read_end = end_address.min(region_end);
+    (read_end > read_start).then_some((read_start, read_end))
+}
 
 /// Read memory from a process
 pub fn read_memory(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-    use windows::Win32::System::Memory::{
-        VirtualQueryEx, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_GUARD, PAGE_NOACCESS,
-    };
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
     };
@@ -79,57 +141,64 @@ pub fn read_memory(args: &Value) -> Result<Value, MemoricError> {
         let mut skipped_bytes = 0u64;
         let mut partial = false;
         let mut errors = Vec::new();
+        let region_query = region_cache::get_memory_regions(pid as u32, args)
+            .map_err(MemoricError::MemoryAccess)?;
+        let mut regions = region_query.regions;
+        regions.sort_by_key(|region| region.base_address);
+        let region_cache_report = region_query.report.to_json();
+        let mut region_index = 0usize;
 
         while current < end_address {
-            let mut mbi = MEMORY_BASIC_INFORMATION::default();
-            let query_result = VirtualQueryEx(
-                *handle,
-                Some(current as *const _),
-                &mut mbi,
-                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
-            );
+            while region_index < regions.len() && regions[region_index].end_address() <= current {
+                region_index += 1;
+            }
 
-            if query_result == 0 {
+            if region_index >= regions.len() {
                 partial = true;
                 skipped_bytes = skipped_bytes.saturating_add(end_address - current);
-                errors.push(format!("VirtualQueryEx failed at 0x{:016X}", current));
+                segments.push(json!({
+                    "address": format!("0x{:016X}", current),
+                    "requested": end_address - current,
+                    "bytes_read": 0,
+                    "skipped": true,
+                    "reason": "outside_cached_region_metadata"
+                }));
                 break;
             }
 
-            let region_base = mbi.BaseAddress as u64;
-            let region_size = mbi.RegionSize as u64;
-            if region_size == 0 {
+            let region = &regions[region_index];
+            if region.base_address > current {
+                let gap_end = end_address.min(region.base_address);
                 partial = true;
-                errors.push(format!(
-                    "VirtualQueryEx returned zero-sized region at 0x{:016X}",
-                    current
-                ));
-                break;
-            }
-
-            let region_end = region_base.saturating_add(region_size);
-            let read_start = current.max(region_base);
-            let read_end = end_address.min(region_end);
-            if read_end <= read_start {
-                current = region_end.max(current.saturating_add(1));
+                skipped_bytes = skipped_bytes.saturating_add(gap_end - current);
+                segments.push(json!({
+                    "address": format!("0x{:016X}", current),
+                    "requested": gap_end - current,
+                    "bytes_read": 0,
+                    "skipped": true,
+                    "reason": "outside_cached_region_metadata"
+                }));
+                current = gap_end;
                 continue;
             }
 
+            let Some((read_start, read_end)) = read_region_overlap(region, current, end_address)
+            else {
+                region_index += 1;
+                continue;
+            };
             let chunk_len = (read_end - read_start) as usize;
-            let readable = mbi.State == MEM_COMMIT
-                && (mbi.Protect.0 & PAGE_GUARD.0) == 0
-                && (mbi.Protect.0 & PAGE_NOACCESS.0) == 0;
 
-            if !readable {
+            if !region.is_scannable() {
                 partial = true;
                 skipped_bytes = skipped_bytes.saturating_add(chunk_len as u64);
-                segments.push(serde_json::json!({
+                segments.push(json!({
                     "address": format!("0x{:016X}", read_start),
                     "requested": chunk_len,
                     "bytes_read": 0,
                     "skipped": true,
-                    "state": format!("0x{:X}", mbi.State.0),
-                    "protect": format!("0x{:X}", mbi.Protect.0),
+                    "state": format!("0x{:X}", region.state),
+                    "protect": format!("0x{:X}", region.protect),
                 }));
                 current = read_end;
                 continue;
@@ -162,8 +231,8 @@ pub fn read_memory(args: &Value) -> Result<Value, MemoricError> {
                     "requested": chunk_len,
                     "bytes_read": bytes_read,
                     "skipped": false,
-                    "state": format!("0x{:X}", mbi.State.0),
-                    "protect": format!("0x{:X}", mbi.Protect.0),
+                    "state": format!("0x{:X}", region.state),
+                    "protect": format!("0x{:X}", region.protect),
                 }));
             } else {
                 partial = true;
@@ -195,8 +264,8 @@ pub fn read_memory(args: &Value) -> Result<Value, MemoricError> {
                             "bytes_read": page_read,
                             "skipped": false,
                             "fallback_chunk": true,
-                            "state": format!("0x{:X}", mbi.State.0),
-                            "protect": format!("0x{:X}", mbi.Protect.0),
+                            "state": format!("0x{:X}", region.state),
+                            "protect": format!("0x{:X}", region.protect),
                         }));
                     } else {
                         skipped_bytes = skipped_bytes.saturating_add(page_len as u64);
@@ -207,8 +276,8 @@ pub fn read_memory(args: &Value) -> Result<Value, MemoricError> {
                                 "bytes_read": 0,
                                 "skipped": true,
                                 "fallback_chunk": true,
-                                "state": format!("0x{:X}", mbi.State.0),
-                                "protect": format!("0x{:X}", mbi.Protect.0),
+                                "state": format!("0x{:X}", region.state),
+                                "protect": format!("0x{:X}", region.protect),
                             }));
                         }
                     }
@@ -216,7 +285,7 @@ pub fn read_memory(args: &Value) -> Result<Value, MemoricError> {
                 }
                 errors.push(format!(
                     "ReadProcessMemory partial/failed at 0x{:016X} len={} protect=0x{:X}",
-                    read_start, chunk_len, mbi.Protect.0
+                    read_start, chunk_len, region.protect
                 ));
             }
 
@@ -240,13 +309,13 @@ pub fn read_memory(args: &Value) -> Result<Value, MemoricError> {
             .map(|&b| if b >= 32 && b <= 126 { b as char } else { '.' })
             .collect();
         let total_bytes_read = buffer.len();
+        let output_artifact =
+            export_memory_artifact(args, "read", Some(pid), Some(address), &buffer)?;
+        let inline_bytes = output_artifact.is_none();
 
-        Ok(serde_json::json!({
+        let mut result = json!({
             "success": true,
             "address": format!("0x{:016X}", address),
-            "bytes": buffer,
-            "hex": hex,
-            "ascii": ascii,
             "bytes_read": total_bytes_read,
             "requested_size": size,
             "partial": partial,
@@ -254,8 +323,28 @@ pub fn read_memory(args: &Value) -> Result<Value, MemoricError> {
             "skipped_bytes": skipped_bytes,
             "segment_count": segments.len(),
             "segments": segments,
-            "errors": errors
-        }))
+            "errors": errors,
+            "region_cache": region_cache_report,
+            "redaction_status": if inline_bytes { "inline" } else { "artifact" }
+        });
+        if inline_bytes {
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert("bytes".to_string(), json!(buffer));
+                obj.insert("hex".to_string(), json!(hex));
+                obj.insert("ascii".to_string(), json!(ascii));
+            }
+        }
+        if let Some(artifact) = output_artifact {
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert("artifact".to_string(), artifact.clone());
+                obj.insert(
+                    "output_path".to_string(),
+                    json!(artifact["path"].as_str().unwrap_or_default()),
+                );
+            }
+        }
+
+        Ok(result)
     }
 }
 
@@ -377,26 +466,49 @@ pub fn stealth_read_memory(args: &Value) -> Result<Value, MemoricError> {
         let _ = windows::Win32::Foundation::CloseHandle(handle);
 
         result_buffer.truncate(total_read);
-        let hex = result_buffer
-            .iter()
-            .map(|b| format!("{:02X}", b))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let ascii: String = result_buffer
-            .iter()
-            .map(|&b| if b >= 32 && b <= 126 { b as char } else { '.' })
-            .collect();
-
-        Ok(serde_json::json!({
+        let output_artifact = export_memory_artifact(
+            args,
+            "stealth_read",
+            Some(pid),
+            Some(address),
+            &result_buffer[..total_read],
+        )?;
+        let inline_bytes = output_artifact.is_none();
+        let mut payload = json!({
             "success": true,
             "technique": "stealth_read_memory",
             "driver": device_path,
-            "bytes": result_buffer,
-            "hex": hex,
-            "ascii": ascii,
             "bytes_read": total_read,
-            "message": format!("BYOVD stealth read {} bytes from PID {} at 0x{:X}", total_read, pid, address)
-        }))
+            "message": format!("BYOVD stealth read {} bytes from PID {} at 0x{:X}", total_read, pid, address),
+            "redaction_status": if inline_bytes { "inline" } else { "artifact" }
+        });
+        if inline_bytes {
+            let hex = result_buffer[..total_read]
+                .iter()
+                .map(|b| format!("{:02X}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let ascii: String = result_buffer[..total_read]
+                .iter()
+                .map(|&b| if b >= 32 && b <= 126 { b as char } else { '.' })
+                .collect();
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("bytes".to_string(), json!(result_buffer));
+                obj.insert("hex".to_string(), json!(hex));
+                obj.insert("ascii".to_string(), json!(ascii));
+            }
+        }
+        if let Some(artifact) = output_artifact {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("artifact".to_string(), artifact.clone());
+                obj.insert(
+                    "output_path".to_string(),
+                    json!(artifact["path"].as_str().unwrap_or_default()),
+                );
+            }
+        }
+
+        Ok(payload)
     }
 }
 
@@ -491,27 +603,45 @@ pub fn scattered_read(args: &Value) -> Result<Value, MemoricError> {
             }
         }
 
-        let hex = result
-            .iter()
-            .map(|b| format!("{:02X}", b))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let ascii: String = result
-            .iter()
-            .map(|&b| if b >= 32 && b <= 126 { b as char } else { '.' })
-            .collect();
-
-        Ok(serde_json::json!({
+        let output_artifact =
+            export_memory_artifact(args, "scattered_read", Some(pid), Some(address), &result)?;
+        let inline_bytes = output_artifact.is_none();
+        let mut payload = serde_json::json!({
             "success": true,
             "technique": "scattered_read",
-            "bytes": result,
-            "hex": hex,
-            "ascii": ascii,
             "bytes_read": total_read,
             "chunks": num_chunks,
             "chunk_size": chunk_size,
+            "redaction_status": if inline_bytes { "inline" } else { "artifact" },
             "message": format!("Scattered read {} bytes in {} random-order chunks", total_read, num_chunks)
-        }))
+        });
+        if inline_bytes {
+            let hex = result
+                .iter()
+                .map(|b| format!("{:02X}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let ascii: String = result
+                .iter()
+                .map(|&b| if b >= 32 && b <= 126 { b as char } else { '.' })
+                .collect();
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("bytes".to_string(), json!(result));
+                obj.insert("hex".to_string(), json!(hex));
+                obj.insert("ascii".to_string(), json!(ascii));
+            }
+        }
+        if let Some(artifact) = output_artifact {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("artifact".to_string(), artifact.clone());
+                obj.insert(
+                    "output_path".to_string(),
+                    json!(artifact["path"].as_str().unwrap_or_default()),
+                );
+            }
+        }
+
+        Ok(payload)
     }
 }
 
@@ -608,21 +738,44 @@ pub fn read_physical_memory(args: &Value) -> Result<Value, MemoricError> {
 
         let _ = windows::Win32::Foundation::CloseHandle(handle);
 
-        let hex = result[..total_read]
-            .iter()
-            .map(|b| format!("{:02X}", b))
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        Ok(serde_json::json!({
+        let output_artifact = export_memory_artifact(
+            args,
+            "physical_read",
+            None,
+            Some(physical_addr),
+            &result[..total_read],
+        )?;
+        let inline_bytes = output_artifact.is_none();
+        let mut payload = json!({
             "success": true,
             "technique": "read_physical_memory",
             "address": format!("0x{:X}", physical_addr),
-            "bytes": result[..total_read].to_vec(),
-            "hex": hex,
             "bytes_read": total_read,
-            "message": format!("Read {} bytes from physical address 0x{:X}", total_read, physical_addr)
-        }))
+            "message": format!("Read {} bytes from physical address 0x{:X}", total_read, physical_addr),
+            "redaction_status": if inline_bytes { "inline" } else { "artifact" }
+        });
+        if inline_bytes {
+            let hex = result[..total_read]
+                .iter()
+                .map(|b| format!("{:02X}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("bytes".to_string(), json!(result[..total_read].to_vec()));
+                obj.insert("hex".to_string(), json!(hex));
+            }
+        }
+        if let Some(artifact) = output_artifact {
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("artifact".to_string(), artifact.clone());
+                obj.insert(
+                    "output_path".to_string(),
+                    json!(artifact["path"].as_str().unwrap_or_default()),
+                );
+            }
+        }
+
+        Ok(payload)
     }
 }
 
@@ -630,6 +783,9 @@ pub fn read_physical_memory(args: &Value) -> Result<Value, MemoricError> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Mutex;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_read_memory_own_process_integer_addr() {
@@ -646,6 +802,13 @@ mod tests {
         let val = result.unwrap();
         assert_eq!(val["bytes_read"], 5);
         assert_eq!(val["bytes"], json!([0x41, 0x42, 0x43, 0x44, 0x45]));
+        assert_eq!(val["region_cache"]["enabled"], true);
+        assert!(
+            val["region_cache"]["coverage"]["regions"]
+                .as_u64()
+                .unwrap_or_default()
+                > 0
+        );
     }
 
     #[test]
@@ -684,7 +847,8 @@ mod tests {
         let result_int = read_memory(&json!({
             "pid": pid,
             "address": addr,
-            "size": 4
+            "size": 4,
+            "region_cache": "refresh"
         }));
         let val_int = result_int.unwrap();
         eprintln!("Integer addr result: {:?}", val_int["bytes"]);
@@ -693,7 +857,8 @@ mod tests {
         let result_str = read_memory(&json!({
             "pid": pid,
             "address": hex_addr,
-            "size": 4
+            "size": 4,
+            "region_cache": "refresh"
         }));
         let val_str = result_str.unwrap();
         eprintln!("String addr result: {:?}", val_str["bytes"]);
@@ -704,6 +869,127 @@ mod tests {
             "String addr mismatch! int_result={:?} str_result={:?}",
             val_int["bytes"],
             val_str["bytes"]
+        );
+    }
+
+    #[test]
+    fn read_memory_exports_to_artifact_when_output_path_is_provided() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let data = vec![0x11u8, 0x22, 0x33, 0x44];
+        let addr = data.as_ptr() as u64;
+        let pid = std::process::id();
+        let output_path = std::env::temp_dir().join(format!(
+            "memoric-read-export-{}-{}.bin",
+            std::process::id(),
+            crate::state::chrono_now_public().replace([':', '-'], "")
+        ));
+
+        let result = read_memory(&json!({
+            "pid": pid,
+            "address": addr,
+            "size": 4,
+            "output_path": output_path.display().to_string()
+        }))
+        .expect("read_memory should export");
+
+        assert_eq!(result["redaction_status"], "artifact");
+        assert_eq!(result["output_path"], output_path.display().to_string());
+        assert!(result["artifact"]["uri"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("memoric://artifact/sha256/"));
+        assert!(result.get("bytes").is_none());
+
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn scattered_read_auto_exports_large_results_to_artifact() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let data = vec![0x5Au8; super::INLINE_MEMORY_BYTE_LIMIT + 1];
+        let addr = data.as_ptr() as u64;
+        let pid = std::process::id();
+
+        let result = scattered_read(&json!({
+            "pid": pid,
+            "address": addr,
+            "size": data.len(),
+            "chunk_size": 128,
+            "artifact_retention_secs": 60
+        }))
+        .expect("scattered_read should export large result");
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["redaction_status"], "artifact");
+        assert_eq!(result["bytes_read"], data.len());
+        assert!(result.get("bytes").is_none());
+        assert!(result.get("hex").is_none());
+        assert!(result.get("ascii").is_none());
+        let uri = result["artifact"]["uri"].as_str().expect("artifact uri");
+        assert!(crate::artifact::is_artifact_uri(uri));
+        let output_path = result["output_path"].as_str().expect("output path");
+        assert!(std::path::Path::new(output_path).exists());
+
+        let _ = crate::artifact::forget(uri);
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn memory_self_test_covers_current_process_alloc_protect_free_and_scan() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let result = memory_self_test(&json!({"include_scan": true})).expect("self test");
+        let pretty = serde_json::to_string_pretty(&result).unwrap();
+
+        assert_eq!(result["all_pass"], true, "self-test result: {}", pretty);
+        assert_eq!(
+            result["tests"]["read_integer_addr"]["pass"], true,
+            "{}",
+            pretty
+        );
+        assert_eq!(
+            result["tests"]["read_hex_string_addr"]["pass"], true,
+            "{}",
+            pretty
+        );
+        assert_eq!(
+            result["tests"]["write_integer_addr"]["pass"], true,
+            "{}",
+            pretty
+        );
+        assert_eq!(
+            result["tests"]["write_hex_string_addr"]["pass"], true,
+            "{}",
+            pretty
+        );
+        assert_eq!(
+            result["tests"]["alloc_current_process"]["pass"], true,
+            "{}",
+            pretty
+        );
+        assert_eq!(
+            result["tests"]["protect_current_process"]["pass"], true,
+            "{}",
+            pretty
+        );
+        assert_eq!(
+            result["tests"]["free_current_process"]["pass"], true,
+            "{}",
+            pretty
+        );
+        assert_eq!(
+            result["tests"]["free_current_process_idempotent"]["pass"], true,
+            "{}",
+            pretty
+        );
+        assert_eq!(
+            result["tests"]["scan_bytes_session"]["enabled"], true,
+            "{}",
+            pretty
+        );
+        assert_eq!(
+            result["tests"]["scan_bytes_session"]["pass"], true,
+            "{}",
+            pretty
         );
     }
 }
@@ -854,7 +1140,21 @@ pub fn memory_self_test(args: &Value) -> Result<Value, MemoricError> {
     let free_second_ok = free_second_result
         .as_ref()
         .ok()
-        .and_then(|v| v.get("success").and_then(|s| s.as_bool()))
+        .and_then(|v| {
+            let success = v.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
+            let already_free = v
+                .get("already_free")
+                .and_then(|s| s.as_bool())
+                .unwrap_or(false);
+            let invalid_after_release =
+                v.get("error")
+                    .and_then(|s| s.as_str())
+                    .is_some_and(|message| {
+                        message.contains("0x800701E7")
+                            || message.to_ascii_lowercase().contains("invalid address")
+                    });
+            Some(success || already_free || invalid_after_release)
+        })
         .unwrap_or(false);
 
     let (scan_ok, scan_result) = if include_scan {

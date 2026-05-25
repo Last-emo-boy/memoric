@@ -3,9 +3,192 @@
 use crate::error::MemoricError;
 use crate::safe_handle::SafeHandle;
 use crate::util::parse_address;
-use serde_json::Value;
+use serde_json::{json, Value};
 #[allow(unused_imports)]
 use std::ffi::c_void;
+
+#[derive(Debug, Clone)]
+struct AppliedHookRollback {
+    address: u64,
+    original_bytes: Vec<u8>,
+}
+
+fn provenance_json(args: &Value) -> Value {
+    json!({
+        "correlation_id": crate::observability::correlation_id_from_args(args),
+        "request_id": args.get("request_id").cloned().unwrap_or(Value::Null),
+        "task_id": args.get("task_id").cloned().unwrap_or(Value::Null),
+        "chain_id": args.get("chain_id").cloned().unwrap_or(Value::Null),
+        "purpose": args.get("purpose").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn restore_hook_rollback(pid: u64, address: u64, original_bytes: &[u8], detail: &str) -> Value {
+    let args = json!({
+        "pid": pid,
+        "address": crate::memory::rollback::format_address(address),
+        "original_bytes": original_bytes,
+    });
+
+    json!({
+        "available": true,
+        "strategy": "restore_hook_original_bytes",
+        "captured_fields": ["pid", "address", "original_bytes"],
+        "original_bytes": original_bytes,
+        "args": args.clone(),
+        "action": {
+            "tool": "hook",
+            "action": "restore",
+            "args": args,
+        },
+        "detail": detail,
+    })
+}
+
+fn restore_hook_capture_rollback(
+    pid: u64,
+    address: u64,
+    capture: &crate::memory::rollback::OriginalBytesCapture,
+    old_protection: Option<u32>,
+    detail: &str,
+) -> Value {
+    let mut rollback = crate::memory::rollback::restore_original_bytes_rollback(
+        pid,
+        address,
+        capture,
+        old_protection,
+        true,
+    );
+
+    rollback["strategy"] = json!("restore_hook_original_bytes");
+    rollback["detail"] = json!(detail);
+    if let Some(action) = rollback.get_mut("action") {
+        action["tool"] = json!("hook");
+        action["action"] = json!("restore");
+        if let Some(args) = action.get_mut("args") {
+            args["original_bytes"] = args.get("bytes").cloned().unwrap_or(Value::Null);
+            if let Some(obj) = args.as_object_mut() {
+                obj.remove("bytes");
+                obj.remove("bypass_protect");
+            }
+        }
+    }
+    if let Some(args) = rollback.get_mut("args") {
+        args["original_bytes"] = args.get("bytes").cloned().unwrap_or(Value::Null);
+        if let Some(obj) = args.as_object_mut() {
+            obj.remove("bytes");
+            obj.remove("bypass_protect");
+        }
+    }
+
+    rollback
+}
+
+fn restore_iat_pointer_rollback(
+    pid: u64,
+    iat_address: u64,
+    original_address: u64,
+    detail: &str,
+) -> Value {
+    let args = json!({
+        "pid": pid,
+        "iat_address": crate::memory::rollback::format_address(iat_address),
+        "original_address": crate::memory::rollback::format_address(original_address),
+    });
+
+    json!({
+        "available": true,
+        "strategy": "restore_iat_pointer",
+        "captured_fields": ["pid", "iat_address", "original_address"],
+        "iat_address": crate::memory::rollback::format_address(iat_address),
+        "original_address": crate::memory::rollback::format_address(original_address),
+        "args": args.clone(),
+        "action": {
+            "tool": "hook",
+            "action": "remove_iat",
+            "args": args,
+        },
+        "detail": detail,
+    })
+}
+
+fn reinstall_iat_pointer_rollback(
+    pid: u64,
+    iat_address: u64,
+    hook_address: u64,
+    detail: &str,
+) -> Value {
+    let args = json!({
+        "pid": pid,
+        "iat_address": crate::memory::rollback::format_address(iat_address),
+        "original_address": crate::memory::rollback::format_address(hook_address),
+    });
+
+    json!({
+        "available": true,
+        "strategy": "restore_removed_iat_hook_pointer",
+        "captured_fields": ["pid", "iat_address", "hook_address"],
+        "iat_address": crate::memory::rollback::format_address(iat_address),
+        "hook_address": crate::memory::rollback::format_address(hook_address),
+        "args": args.clone(),
+        "action": {
+            "tool": "hook",
+            "action": "remove_iat",
+            "args": args,
+        },
+        "detail": detail,
+    })
+}
+
+fn restore_pre_restore_hook_bytes_rollback(
+    pid: u64,
+    address: u64,
+    capture: &crate::memory::rollback::OriginalBytesCapture,
+) -> Value {
+    let mut rollback = restore_hook_capture_rollback(
+        pid,
+        address,
+        capture,
+        None,
+        "hook(action='restore') captured the bytes present before restoring the original hook bytes",
+    );
+
+    rollback["strategy"] = json!("restore_pre_restore_hook_bytes");
+
+    rollback
+}
+
+fn detour_transaction_rollback(pid: u64, applied: &[AppliedHookRollback]) -> Value {
+    let steps = applied
+        .iter()
+        .map(|hook| {
+            let rollback = restore_hook_rollback(
+                pid,
+                hook.address,
+                &hook.original_bytes,
+                "detour transaction captured original bytes before patching this target",
+            );
+            json!({
+                "address": crate::memory::rollback::format_address(hook.address),
+                "hook_size": hook.original_bytes.len(),
+                "rollback": rollback,
+            })
+        })
+        .collect::<Vec<_>>();
+    let actions = steps
+        .iter()
+        .filter_map(|step| step["rollback"].get("action").cloned())
+        .collect::<Vec<_>>();
+
+    json!({
+        "available": !applied.is_empty(),
+        "strategy": "restore_detour_original_bytes",
+        "captured_fields": ["pid", "hooks[].address", "hooks[].original_bytes"],
+        "hooks": steps,
+        "actions": actions,
+        "detail": "detour transaction captured original bytes for each applied hook; rollback should restore each hook target",
+    })
+}
 
 /// IAT Hook — full implementation with PE header parsing
 /// Parses the remote process IAT, finds the target import, and patches it
@@ -314,6 +497,13 @@ pub fn hook_function_iat(args: &Value) -> Result<Value, MemoricError> {
             "original_value": format!("0x{:016X}", original_iat_value),
             "new_value": format!("0x{:016X}", hook_address),
             "pid": pid,
+            "rollback": restore_iat_pointer_rollback(
+                pid,
+                iat_entry_addr,
+                original_iat_value,
+                "IAT hook can be removed by writing the captured original pointer back to the IAT entry",
+            ),
+            "provenance": provenance_json(args),
             "message": format!("IAT hook installed: {}!{} -> 0x{:016X}", module, function, hook_address)
         }))
     }
@@ -324,7 +514,8 @@ pub fn inline_hook(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
     use windows::Win32::System::Memory::{VirtualProtectEx, PAGE_EXECUTE_READWRITE};
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_WRITE,
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ,
+        PROCESS_VM_WRITE,
     };
 
     let pid = args
@@ -348,7 +539,7 @@ pub fn inline_hook(args: &Value) -> Result<Value, MemoricError> {
 
     unsafe {
         let handle = OpenProcess(
-            PROCESS_QUERY_INFORMATION | PROCESS_VM_WRITE | PROCESS_VM_OPERATION,
+            PROCESS_QUERY_INFORMATION | PROCESS_VM_WRITE | PROCESS_VM_READ | PROCESS_VM_OPERATION,
             false,
             pid as u32,
         )
@@ -356,57 +547,33 @@ pub fn inline_hook(args: &Value) -> Result<Value, MemoricError> {
         let handle = SafeHandle::new(handle);
 
         let rel_offset_i64 = hook_address as i64 - (target_address as i64 + 5);
-        if rel_offset_i64 > i32::MAX as i64 || rel_offset_i64 < i32::MIN as i64 {
-            // Distance > 2GB: use 14-byte absolute JMP (mov rax, addr; jmp rax)
-            let mut abs_hook = Vec::with_capacity(14);
-            abs_hook.extend_from_slice(&[0x48, 0xB8]); // mov rax, imm64
-            abs_hook.extend_from_slice(&hook_address.to_le_bytes());
-            abs_hook.extend_from_slice(&[0xFF, 0xE0]); // jmp rax
+        let (hook_bytes, hook_description) =
+            if rel_offset_i64 > i32::MAX as i64 || rel_offset_i64 < i32::MIN as i64 {
+                // Distance > 2GB: use 14-byte absolute JMP (mov rax, addr; jmp rax)
+                let mut abs_hook = Vec::with_capacity(14);
+                abs_hook.extend_from_slice(&[0x48, 0xB8]); // mov rax, imm64
+                abs_hook.extend_from_slice(&hook_address.to_le_bytes());
+                abs_hook.extend_from_slice(&[0xFF, 0xE0]); // jmp rax
+                (abs_hook, "mov rax + jmp rax (14-byte absolute)")
+            } else {
+                let rel_offset = rel_offset_i64 as u32;
+                (
+                    vec![
+                        0xE9,
+                        (rel_offset & 0xFF) as u8,
+                        ((rel_offset >> 8) & 0xFF) as u8,
+                        ((rel_offset >> 16) & 0xFF) as u8,
+                        ((rel_offset >> 24) & 0xFF) as u8,
+                    ],
+                    "E9 + rel32",
+                )
+            };
 
-            let mut old_protect = windows::Win32::System::Memory::PAGE_PROTECTION_FLAGS(0);
-            VirtualProtectEx(
-                *handle,
-                target_address as *mut _,
-                abs_hook.len(),
-                PAGE_EXECUTE_READWRITE,
-                &mut old_protect,
-            )
-            .map_err(|e| MemoricError::WindowsApi(format!("Failed to change protection: {}", e)))?;
-
-            WriteProcessMemory(
-                *handle,
-                target_address as *const _,
-                abs_hook.as_ptr() as *const _,
-                abs_hook.len(),
-                None,
-            )
-            .map_err(|e| MemoricError::WindowsApi(format!("Failed to write hook: {}", e)))?;
-
-            let _ = VirtualProtectEx(
-                *handle,
-                target_address as *mut _,
-                abs_hook.len(),
-                old_protect,
-                &mut old_protect,
-            );
-
-            return Ok(serde_json::json!({
-                "success": true,
-                "target_address": format!("0x{:016X}", target_address),
-                "hook_address": format!("0x{:016X}", hook_address),
-                "hook_bytes": "mov rax + jmp rax (14-byte absolute)",
-                "hook_size": 14
-            }));
-        }
-
-        let rel_offset = rel_offset_i64 as u32;
-        let hook_bytes: [u8; 5] = [
-            0xE9,
-            (rel_offset & 0xFF) as u8,
-            ((rel_offset >> 8) & 0xFF) as u8,
-            ((rel_offset >> 16) & 0xFF) as u8,
-            ((rel_offset >> 24) & 0xFF) as u8,
-        ];
+        let original = crate::memory::rollback::capture_original_bytes(
+            *handle,
+            target_address,
+            hook_bytes.len(),
+        );
 
         let mut old_protect = windows::Win32::System::Memory::PAGE_PROTECTION_FLAGS(0);
         VirtualProtectEx(
@@ -442,7 +609,17 @@ pub fn inline_hook(args: &Value) -> Result<Value, MemoricError> {
             "success": true,
             "target_address": format!("0x{:016X}", target_address),
             "hook_address": format!("0x{:016X}", hook_address),
-            "hook_bytes": "E9 + rel32"
+            "hook_bytes": hook_description,
+            "hook_size": hook_bytes.len(),
+            "old_protect": old_protect.0,
+            "rollback": restore_hook_capture_rollback(
+                pid,
+                target_address,
+                &original,
+                Some(old_protect.0),
+                "inline hook captured original bytes before patching the target function",
+            ),
+            "provenance": provenance_json(args)
         }))
     }
 }
@@ -698,28 +875,37 @@ pub fn detour_transaction(args: &Value) -> Result<Value, MemoricError> {
                 old_prot,
                 &mut old_prot,
             );
-            applied.push((target, orig, hook_bytes.len()));
+            applied.push(AppliedHookRollback {
+                address: target,
+                original_bytes: orig[..hook_bytes.len()].to_vec(),
+            });
         }
 
         // Phase 3: Rollback if any hook failed
         if rollback_needed {
-            for (addr, orig, size) in &applied {
+            for hook in &applied {
                 let mut old_prot = windows::Win32::System::Memory::PAGE_PROTECTION_FLAGS(0);
                 let _ = VirtualProtectEx(
                     *handle,
-                    *addr as *mut _,
-                    *size,
+                    hook.address as *mut _,
+                    hook.original_bytes.len(),
                     PAGE_EXECUTE_READWRITE,
                     &mut old_prot,
                 );
                 let _ = WriteProcessMemory(
                     *handle,
-                    *addr as *const _,
-                    orig.as_ptr() as *const _,
-                    *size,
+                    hook.address as *const _,
+                    hook.original_bytes.as_ptr() as *const _,
+                    hook.original_bytes.len(),
                     None,
                 );
-                let _ = VirtualProtectEx(*handle, *addr as *mut _, *size, old_prot, &mut old_prot);
+                let _ = VirtualProtectEx(
+                    *handle,
+                    hook.address as *mut _,
+                    hook.original_bytes.len(),
+                    old_prot,
+                    &mut old_prot,
+                );
             }
         }
 
@@ -739,7 +925,9 @@ pub fn detour_transaction(args: &Value) -> Result<Value, MemoricError> {
             "success": true,
             "hooks_applied": applied.len(),
             "threads_suspended": suspended_threads.len(),
-            "transactional": true
+            "transactional": true,
+            "rollback": detour_transaction_rollback(pid, &applied),
+            "provenance": provenance_json(args)
         }))
     }
 }
@@ -749,7 +937,8 @@ pub fn restore_hook(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
     use windows::Win32::System::Memory::{VirtualProtectEx, PAGE_EXECUTE_READWRITE};
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_WRITE,
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ,
+        PROCESS_VM_WRITE,
     };
 
     let pid = args
@@ -774,12 +963,15 @@ pub fn restore_hook(args: &Value) -> Result<Value, MemoricError> {
 
     unsafe {
         let handle = OpenProcess(
-            PROCESS_QUERY_INFORMATION | PROCESS_VM_WRITE | PROCESS_VM_OPERATION,
+            PROCESS_QUERY_INFORMATION | PROCESS_VM_WRITE | PROCESS_VM_READ | PROCESS_VM_OPERATION,
             false,
             pid as u32,
         )
         .map_err(|e| MemoricError::WindowsApi(format!("Failed to open process: {}", e)))?;
         let handle = SafeHandle::new(handle);
+
+        let previous_hook_bytes =
+            crate::memory::rollback::capture_original_bytes(*handle, address, bytes.len());
 
         let mut old_protect = windows::Win32::System::Memory::PAGE_PROTECTION_FLAGS(0);
         VirtualProtectEx(
@@ -811,6 +1003,16 @@ pub fn restore_hook(args: &Value) -> Result<Value, MemoricError> {
 
         Ok(serde_json::json!({
             "success": true,
+            "pid": pid,
+            "address": crate::memory::rollback::format_address(address),
+            "bytes_restored": bytes.len(),
+            "old_protect": old_protect.0,
+            "rollback": restore_pre_restore_hook_bytes_rollback(
+                pid,
+                address,
+                &previous_hook_bytes,
+            ),
+            "provenance": provenance_json(args),
             "message": "Hook restored"
         }))
     }
@@ -889,7 +1091,144 @@ pub fn set_windows_hook_inject(args: &Value) -> Result<Value, MemoricError> {
             "dll_path": dll_path,
             "export_name": export_name,
             "scope": "global",
+            "rollback": {
+                "available": "partial",
+                "strategy": "unhook_windows_hook",
+                "captured_fields": ["hook_handle", "hook_type", "dll_path", "export_name"],
+                "hook_handle": hook.0 as u64,
+                "reason": "no_remove_winhook_tool_action",
+                "action": Value::Null,
+                "detail": "Windows hook handle was captured, but the MCP hook tool does not yet expose a remove_winhook action for automated rollback"
+            },
+            "provenance": provenance_json(args),
             "message": format!("Global {} hook installed from {}", hook_type_str, dll_path)
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn restore_hook_rollback_emits_executable_restore_action() {
+        let rollback =
+            restore_hook_rollback(1234, 0x401000, &[0x90, 0x90, 0xC3], "captured before patch");
+
+        assert_eq!(rollback["available"], true);
+        assert_eq!(rollback["strategy"], "restore_hook_original_bytes");
+        assert_eq!(rollback["original_bytes"], json!([0x90, 0x90, 0xC3]));
+        assert_eq!(rollback["action"]["tool"], "hook");
+        assert_eq!(rollback["action"]["action"], "restore");
+        assert_eq!(rollback["action"]["args"]["pid"], 1234);
+        assert_eq!(rollback["action"]["args"]["address"], "0x0000000000401000");
+        assert_eq!(
+            rollback["action"]["args"]["original_bytes"],
+            json!([0x90, 0x90, 0xC3])
+        );
+    }
+
+    #[test]
+    fn capture_rollback_uses_hook_restore_action() {
+        let capture = crate::memory::rollback::OriginalBytesCapture {
+            bytes: Some(vec![0xCC, 0x90, 0xC3]),
+            bytes_requested: 3,
+            bytes_read: 3,
+            error: None,
+        };
+        let rollback =
+            restore_hook_capture_rollback(1234, 0x401000, &capture, Some(0x20), "captured");
+
+        assert_eq!(rollback["available"], true);
+        assert_eq!(rollback["strategy"], "restore_hook_original_bytes");
+        assert_eq!(rollback["old_protection"], 0x20);
+        assert_eq!(rollback["action"]["tool"], "hook");
+        assert_eq!(rollback["action"]["action"], "restore");
+        assert!(rollback["action"]["args"]["bytes"].is_null());
+        assert_eq!(
+            rollback["action"]["args"]["original_bytes"],
+            json!([0xCC, 0x90, 0xC3])
+        );
+    }
+
+    #[test]
+    fn iat_install_rollback_restores_original_pointer() {
+        let rollback =
+            restore_iat_pointer_rollback(1234, 0x500000, 0x700000, "restore original import");
+
+        assert_eq!(rollback["available"], true);
+        assert_eq!(rollback["strategy"], "restore_iat_pointer");
+        assert_eq!(rollback["action"]["tool"], "hook");
+        assert_eq!(rollback["action"]["action"], "remove_iat");
+        assert_eq!(
+            rollback["action"]["args"]["iat_address"],
+            "0x0000000000500000"
+        );
+        assert_eq!(
+            rollback["action"]["args"]["original_address"],
+            "0x0000000000700000"
+        );
+    }
+
+    #[test]
+    fn iat_remove_rollback_can_reinstall_removed_pointer() {
+        let rollback = reinstall_iat_pointer_rollback(
+            1234,
+            0x500000,
+            0x710000,
+            "restore removed hook pointer",
+        );
+
+        assert_eq!(rollback["available"], true);
+        assert_eq!(rollback["strategy"], "restore_removed_iat_hook_pointer");
+        assert_eq!(rollback["action"]["tool"], "hook");
+        assert_eq!(rollback["action"]["action"], "remove_iat");
+        assert_eq!(
+            rollback["action"]["args"]["original_address"],
+            "0x0000000000710000"
+        );
+    }
+
+    #[test]
+    fn detour_transaction_rollback_lists_restore_actions() {
+        let applied = vec![
+            AppliedHookRollback {
+                address: 0x401000,
+                original_bytes: vec![0x55, 0x48, 0x89, 0xE5, 0x90],
+            },
+            AppliedHookRollback {
+                address: 0x402000,
+                original_bytes: vec![0x48, 0x83, 0xEC, 0x28],
+            },
+        ];
+        let rollback = detour_transaction_rollback(1234, &applied);
+
+        assert_eq!(rollback["available"], true);
+        assert_eq!(rollback["strategy"], "restore_detour_original_bytes");
+        assert_eq!(rollback["hooks"].as_array().unwrap().len(), 2);
+        assert_eq!(rollback["actions"].as_array().unwrap().len(), 2);
+        assert_eq!(rollback["actions"][0]["tool"], "hook");
+        assert_eq!(rollback["actions"][0]["action"], "restore");
+        assert_eq!(
+            rollback["actions"][0]["args"]["original_bytes"],
+            json!([0x55, 0x48, 0x89, 0xE5, 0x90])
+        );
+    }
+
+    #[test]
+    fn hook_provenance_carries_request_task_chain_and_purpose() {
+        let provenance = provenance_json(&json!({
+            "request_id": "req-hook",
+            "task_id": "task-hook",
+            "chain_id": "chain-hook",
+            "purpose": "test hook provenance"
+        }));
+
+        assert_eq!(provenance["correlation_id"], "req-hook");
+        assert_eq!(provenance["request_id"], "req-hook");
+        assert_eq!(provenance["task_id"], "task-hook");
+        assert_eq!(provenance["chain_id"], "chain-hook");
+        assert_eq!(provenance["purpose"], "test hook provenance");
     }
 }

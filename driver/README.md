@@ -26,6 +26,7 @@ Custom WDM kernel driver providing direct kernel-level primitives for memoric, r
 | `PPL_REMOVE` | `0x80002020` | Zero PS_PROTECTION field |
 | `WRITE_KERNEL` | `0x80002024` | Force-write kernel memory (CR0.WP bypass) |
 | `VA_TO_PA` | `0x80002028` | Translate VA→PA (MmGetPhysicalAddress) |
+| `CAPABILITIES` | `0x80002104` | Query ABI version, driver version, feature bitmap, and driver limits |
 
 ## Build
 
@@ -112,9 +113,11 @@ The driver dynamically discovers critical EPROCESS offsets at load time:
 - **ActiveProcessLinks**: Located immediately after UniqueProcessId
 - **Token**: Located via `PsReferencePrimaryToken` + EX_FAST_REF scan
 - **ImageFileName**: Located via `PsGetProcessImageFileName`
-- **Protection, VadRoot**: Hardcoded per OS build (fallback table)
+- **Protection, VadRoot**: Discovered dynamically; offset-dependent operations fail closed if resolution is incomplete.
 
 Supported Windows builds: 17763 (1809), 18362/18363 (1903/1909), 19041-19045 (2004-22H2), 22000+ (Win11), 26100+ (24H2).
+
+Before loading, use `kernel(action='status')` from the MCP server to inspect signing, HVCI/Memory Integrity, vulnerable driver blocklist, payload/device reachability, and static callback offset support. The status action is probe-only and does not auto-load or install the driver.
 
 ## Debugging
 

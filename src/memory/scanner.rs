@@ -1,10 +1,12 @@
 //! Memory scanner implementations
 
 use crate::error::MemoricError;
+use crate::memory::region_cache::{self, MemoryRegion};
+use crate::runtime::RuntimeContext;
 use crate::safe_handle::SafeHandle;
 use crate::util::parse_address;
 use once_cell::sync::Lazy;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -24,6 +26,94 @@ const MEM_COMMIT: u32 = 0x1000;
 const MEM_MAPPED: u32 = 0x40000;
 const MEM_IMAGE: u32 = 0x1000000;
 const MEM_PRIVATE: u32 = 0x20000;
+const PAGE_READONLY_BITS: u32 = 0x02;
+const PAGE_READWRITE_BITS: u32 = 0x04;
+const PAGE_WRITECOPY_BITS: u32 = 0x08;
+const PAGE_EXECUTE_READ_BITS: u32 = 0x20;
+const PAGE_EXECUTE_READWRITE_BITS: u32 = 0x40;
+const PAGE_EXECUTE_WRITECOPY_BITS: u32 = 0x80;
+const PROTECT_WRITABLE: u32 = PAGE_READWRITE_BITS | PAGE_EXECUTE_READWRITE_BITS;
+const PROTECT_READABLE: u32 = PAGE_READONLY_BITS
+    | PAGE_READWRITE_BITS
+    | PAGE_WRITECOPY_BITS
+    | PAGE_EXECUTE_READ_BITS
+    | PAGE_EXECUTE_READWRITE_BITS
+    | PAGE_EXECUTE_WRITECOPY_BITS;
+
+fn scanner_runtime(args: &Value) -> Result<RuntimeContext, MemoricError> {
+    RuntimeContext::from_args(args).map_err(MemoricError::Other)
+}
+
+fn check_runtime(runtime: &RuntimeContext) -> Result<(), MemoricError> {
+    runtime.check().map_err(MemoricError::Other)
+}
+
+#[derive(Clone, Debug)]
+struct ScanRegionView {
+    base: usize,
+    size: usize,
+    protect: u32,
+    region_type: u32,
+}
+
+fn clipped_region_view(region: &MemoryRegion, start_address: usize) -> Option<ScanRegionView> {
+    let start = start_address as u64;
+    let region_end = region.end_address();
+    if region_end <= start {
+        return None;
+    }
+
+    let base = region.base_address.max(start);
+    let size = region_end.saturating_sub(base);
+    if base > usize::MAX as u64 || size == 0 || size > usize::MAX as u64 {
+        return None;
+    }
+
+    Some(ScanRegionView {
+        base: base as usize,
+        size: size as usize,
+        protect: region.protect,
+        region_type: region.region_type,
+    })
+}
+
+fn get_cached_scan_regions(
+    pid: u64,
+    args: &Value,
+    start_address: usize,
+    protect_mask: u32,
+    exclude_mapped: bool,
+    exclude_image: bool,
+    module_regions: Option<&[(usize, usize)]>,
+) -> Result<(Vec<ScanRegionView>, Value, u64), MemoricError> {
+    let query = region_cache::get_scannable_regions(pid as u32, args)
+        .map_err(MemoricError::MemoryAccess)?;
+    let mut regions = Vec::new();
+    let mut skipped_regions = 0u64;
+
+    for region in &query.regions {
+        let Some(view) = clipped_region_view(region, start_address) else {
+            continue;
+        };
+
+        let is_target = region.state == MEM_COMMIT && (view.protect & protect_mask) != 0;
+        let passes_type =
+            is_target && should_scan_region(view.region_type, exclude_mapped, exclude_image);
+        let passes_module = if let Some(module_regions) = module_regions {
+            !module_regions.is_empty() && in_module_regions(view.base, view.size, module_regions)
+        } else {
+            true
+        };
+
+        if passes_type && passes_module {
+            regions.push(view);
+        } else if is_target {
+            skipped_regions = skipped_regions.saturating_add(1);
+        }
+    }
+
+    Ok((regions, query.report.to_json(), skipped_regions))
+}
 
 /// Get module base address and size ranges for a named module in a process.
 /// Returns Vec<(base, size)> for matching modules.
@@ -108,9 +198,6 @@ fn should_scan_region(region_type: u32, exclude_mapped: bool, exclude_image: boo
 /// Scan for exact values
 pub fn scan_exact(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-    use windows::Win32::System::Memory::{
-        VirtualQueryEx, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_READWRITE,
-    };
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
     };
@@ -119,6 +206,7 @@ pub fn scan_exact(args: &Value) -> Result<Value, MemoricError> {
         .get("pid")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| MemoricError::MemoryAccess("Missing pid".to_string()))?;
+    let runtime = scanner_runtime(args)?;
     let value = args
         .get("value")
         .ok_or_else(|| MemoricError::MemoryAccess("Missing value".to_string()))?;
@@ -149,6 +237,7 @@ pub fn scan_exact(args: &Value) -> Result<Value, MemoricError> {
     let module_name = args.get("module_name").and_then(|v| v.as_str());
 
     tracing::info!("Scanning process {} for {:?} ({}) timeout={}s start=0x{:X} exclude_mapped={} exclude_image={}", pid, value, scan_type, timeout_secs, start_address, exclude_mapped, exclude_image);
+    check_runtime(&runtime)?;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
@@ -172,16 +261,25 @@ pub fn scan_exact(args: &Value) -> Result<Value, MemoricError> {
 
         // Resolve module regions if module_name specified
         let module_regions = module_name.map(|name| get_module_regions(*handle, name));
+        let (scan_regions, region_cache_report, skipped_regions) = get_cached_scan_regions(
+            pid,
+            args,
+            start_address,
+            PROTECT_WRITABLE,
+            exclude_mapped,
+            exclude_image,
+            module_regions.as_deref(),
+        )?;
 
         let mut addresses = Vec::new();
         let mut session_data: Vec<(usize, Vec<u8>)> = Vec::new();
-        let mut addr = start_address;
         let mut timed_out = false;
         let mut last_address = 0usize;
         let mut scanned_bytes = 0u64;
-        let mut skipped_regions = 0u64;
 
-        loop {
+        for region in scan_regions {
+            let addr = region.base;
+            check_runtime(&runtime)?;
             // Check timeout
             if std::time::Instant::now() >= deadline {
                 timed_out = true;
@@ -189,43 +287,15 @@ pub fn scan_exact(args: &Value) -> Result<Value, MemoricError> {
                 break;
             }
 
-            let mut mbi = MEMORY_BASIC_INFORMATION::default();
-            let result = VirtualQueryEx(
-                *handle,
-                Some(addr as *const _),
-                &mut mbi,
-                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
-            );
-
-            if result == 0 {
-                break;
-            }
-
-            // Only scan writable committed memory (typical for game values)
-            let is_target = mbi.Protect.0 & (PAGE_READWRITE.0 | PAGE_EXECUTE_READWRITE.0) != 0
-                && mbi.State.0 == MEM_COMMIT;
-
-            // Apply region type filters
-            let passes_type_filter =
-                is_target && should_scan_region(mbi.Type.0, exclude_mapped, exclude_image);
-
-            // Apply module filter
-            let passes_module_filter = if let Some(ref regions) = module_regions {
-                !regions.is_empty()
-                    && in_module_regions(mbi.BaseAddress as usize, mbi.RegionSize, regions)
-            } else {
-                true
-            };
-
-            if passes_type_filter && passes_module_filter {
-                let mut buffer = vec![0u8; mbi.RegionSize];
+            {
+                let mut buffer = vec![0u8; region.size];
                 let mut bytes_read = 0usize;
 
                 if ReadProcessMemory(
                     *handle,
                     addr as *const _,
                     buffer.as_mut_ptr() as *mut _,
-                    mbi.RegionSize,
+                    region.size,
                     Some(&mut bytes_read as *mut _),
                 )
                 .is_ok()
@@ -239,6 +309,9 @@ pub fn scan_exact(args: &Value) -> Result<Value, MemoricError> {
                             if let Some(val) = value.as_i64() {
                                 let bytes = (val as i32).to_ne_bytes();
                                 for i in 0..buffer.len().saturating_sub(4) {
+                                    if i % 4096 == 0 {
+                                        check_runtime(&runtime)?;
+                                    }
                                     if buffer[i..i + 4] == bytes[..] {
                                         let found_addr = addr + i;
                                         addresses.push(format!("0x{:016X}", found_addr));
@@ -251,6 +324,9 @@ pub fn scan_exact(args: &Value) -> Result<Value, MemoricError> {
                             if let Some(val) = value.as_f64() {
                                 let bytes = (val as f32).to_ne_bytes();
                                 for i in 0..buffer.len().saturating_sub(4) {
+                                    if i % 4096 == 0 {
+                                        check_runtime(&runtime)?;
+                                    }
                                     if buffer[i..i + 4] == bytes[..] {
                                         let found_addr = addr + i;
                                         addresses.push(format!("0x{:016X}", found_addr));
@@ -263,6 +339,9 @@ pub fn scan_exact(args: &Value) -> Result<Value, MemoricError> {
                             if let Some(val) = value.as_str() {
                                 let bytes = val.as_bytes();
                                 for i in 0..buffer.len().saturating_sub(bytes.len()) {
+                                    if i % 4096 == 0 {
+                                        check_runtime(&runtime)?;
+                                    }
                                     if buffer[i..i + bytes.len()] == bytes[..] {
                                         let found_addr = addr + i;
                                         addresses.push(format!("0x{:016X}", found_addr));
@@ -281,6 +360,9 @@ pub fn scan_exact(args: &Value) -> Result<Value, MemoricError> {
                                     .filter_map(|v| v.as_u64().map(|b| b as u8))
                                     .collect();
                                 for i in 0..buffer.len().saturating_sub(pattern.len()) {
+                                    if i % 4096 == 0 {
+                                        check_runtime(&runtime)?;
+                                    }
                                     if buffer[i..i + pattern.len()] == pattern[..] {
                                         let found_addr = addr + i;
                                         addresses.push(format!("0x{:016X}", found_addr));
@@ -295,11 +377,7 @@ pub fn scan_exact(args: &Value) -> Result<Value, MemoricError> {
                         _ => {}
                     }
                 }
-            } else if is_target {
-                skipped_regions += 1;
             }
-
-            addr = (mbi.BaseAddress as usize) + mbi.RegionSize;
         }
 
         // Store scan state for scan_changed
@@ -335,6 +413,7 @@ pub fn scan_exact(args: &Value) -> Result<Value, MemoricError> {
             "last_address": format!("0x{:016X}", last_address),
             "scanned_bytes": scanned_bytes,
             "skipped_regions": skipped_regions,
+            "region_cache": region_cache_report,
             "filters": {
                 "exclude_mapped": exclude_mapped,
                 "exclude_image": exclude_image,
@@ -355,6 +434,7 @@ pub fn scan_changed(args: &Value) -> Result<Value, MemoricError> {
         .get("pid")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| MemoricError::MemoryAccess("Missing pid".to_string()))?;
+    let runtime = scanner_runtime(args)?;
     let change = args
         .get("change")
         .and_then(|v| v.as_str())
@@ -363,6 +443,7 @@ pub fn scan_changed(args: &Value) -> Result<Value, MemoricError> {
     let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
     tracing::info!("Scanning process {} for {} values", pid, change);
+    check_runtime(&runtime)?;
 
     // Get previous scan results
     let prev_session = {
@@ -393,6 +474,7 @@ pub fn scan_changed(args: &Value) -> Result<Value, MemoricError> {
 
         // Re-scan previous addresses and check for changes
         for (addr, old_value) in prev_session.addresses {
+            check_runtime(&runtime)?;
             let mut buffer = vec![0u8; old_value.len()];
             let mut bytes_read = 0usize;
 
@@ -452,10 +534,6 @@ pub fn scan_changed(args: &Value) -> Result<Value, MemoricError> {
 
 /// Scan for unknown values (first scan) - scans all readable memory
 pub fn scan_unknown(args: &Value) -> Result<Value, MemoricError> {
-    use windows::Win32::System::Memory::{
-        VirtualQueryEx, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
-        PAGE_READONLY, PAGE_READWRITE,
-    };
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
     };
@@ -464,6 +542,7 @@ pub fn scan_unknown(args: &Value) -> Result<Value, MemoricError> {
         .get("pid")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| MemoricError::MemoryAccess("Missing pid".to_string()))?;
+    let runtime = scanner_runtime(args)?;
 
     // Region type filters
     let exclude_mapped = args
@@ -482,6 +561,7 @@ pub fn scan_unknown(args: &Value) -> Result<Value, MemoricError> {
         exclude_mapped,
         exclude_image
     );
+    check_runtime(&runtime)?;
 
     unsafe {
         let handle = OpenProcess(
@@ -493,54 +573,28 @@ pub fn scan_unknown(args: &Value) -> Result<Value, MemoricError> {
         let handle = SafeHandle::new(handle);
 
         let module_regions = module_name.map(|name| get_module_regions(*handle, name));
+        let (scan_regions, region_cache_report, _skipped_regions) = get_cached_scan_regions(
+            pid,
+            args,
+            0,
+            PROTECT_READABLE,
+            exclude_mapped,
+            exclude_image,
+            module_regions.as_deref(),
+        )?;
 
         let mut regions = Vec::new();
-        let mut addr = 0usize;
         let mut total_readable = 0u64;
 
-        loop {
-            let mut mbi = MEMORY_BASIC_INFORMATION::default();
-            let result = VirtualQueryEx(
-                *handle,
-                Some(addr as *const _),
-                &mut mbi,
-                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
-            );
-
-            if result == 0 {
-                break;
-            }
-
-            // Check if memory is readable and committed
-            let is_readable = (mbi.Protect.0
-                & (PAGE_READWRITE.0
-                    | PAGE_EXECUTE_READWRITE.0
-                    | PAGE_READONLY.0
-                    | PAGE_EXECUTE_READ.0))
-                != 0;
-
-            let passes_type_filter = is_readable
-                && mbi.State.0 == MEM_COMMIT
-                && should_scan_region(mbi.Type.0, exclude_mapped, exclude_image);
-
-            let passes_module_filter = if let Some(ref mod_regions) = module_regions {
-                !mod_regions.is_empty()
-                    && in_module_regions(mbi.BaseAddress as usize, mbi.RegionSize, mod_regions)
-            } else {
-                true
-            };
-
-            if passes_type_filter && passes_module_filter {
-                regions.push(serde_json::json!({
-                    "base_address": format!("0x{:016X}", mbi.BaseAddress as usize),
-                    "size": mbi.RegionSize,
-                    "protect": mbi.Protect.0,
-                    "type": mbi.Type.0
-                }));
-                total_readable += mbi.RegionSize as u64;
-            }
-
-            addr = (mbi.BaseAddress as usize) + mbi.RegionSize;
+        for region in scan_regions {
+            check_runtime(&runtime)?;
+            regions.push(json!({
+                "base_address": format!("0x{:016X}", region.base),
+                "size": region.size,
+                "protect": region.protect,
+                "type": region.region_type
+            }));
+            total_readable += region.size as u64;
         }
 
         tracing::info!(
@@ -553,6 +607,7 @@ pub fn scan_unknown(args: &Value) -> Result<Value, MemoricError> {
             "regions": regions,
             "count": regions.len(),
             "total_readable_bytes": total_readable,
+            "region_cache": region_cache_report,
             "message": "Use scan_changed after modifying values to find what changed",
             "filters": {
                 "exclude_mapped": exclude_mapped,
@@ -566,10 +621,6 @@ pub fn scan_unknown(args: &Value) -> Result<Value, MemoricError> {
 /// Pattern scan (AOB) - scans ALL readable memory including code and headers
 pub fn find_pattern(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-    use windows::Win32::System::Memory::{
-        VirtualQueryEx, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
-        PAGE_EXECUTE_WRITECOPY, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
-    };
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
     };
@@ -578,6 +629,7 @@ pub fn find_pattern(args: &Value) -> Result<Value, MemoricError> {
         .get("pid")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| MemoricError::MemoryAccess("Missing pid".to_string()))?;
+    let runtime = scanner_runtime(args)?;
     let signature = args
         .get("signature")
         .and_then(|v| v.as_str())
@@ -597,6 +649,7 @@ pub fn find_pattern(args: &Value) -> Result<Value, MemoricError> {
     let module_name = args.get("module_name").and_then(|v| v.as_str());
 
     tracing::info!("Scanning process {} for pattern '{}'", pid, signature);
+    check_runtime(&runtime)?;
 
     // Parse signature (e.g., "A1 ?? ?? 00 FF")
     let pattern: Vec<Option<u8>> = signature
@@ -624,53 +677,30 @@ pub fn find_pattern(args: &Value) -> Result<Value, MemoricError> {
         let handle = SafeHandle::new(handle);
 
         let module_regions = module_name.map(|name| get_module_regions(*handle, name));
+        let (scan_regions, region_cache_report, _skipped_regions) = get_cached_scan_regions(
+            pid,
+            args,
+            0,
+            PROTECT_READABLE,
+            exclude_mapped,
+            exclude_image,
+            module_regions.as_deref(),
+        )?;
 
         let mut addresses = Vec::new();
-        let mut addr = 0usize;
 
-        // All readable page protections (including code/readonly for PE headers)
-        let readable = PAGE_READONLY.0
-            | PAGE_READWRITE.0
-            | PAGE_EXECUTE_READ.0
-            | PAGE_EXECUTE_READWRITE.0
-            | PAGE_WRITECOPY.0
-            | PAGE_EXECUTE_WRITECOPY.0;
-
-        loop {
-            let mut mbi = MEMORY_BASIC_INFORMATION::default();
-            let result = VirtualQueryEx(
-                *handle,
-                Some(addr as *const _),
-                &mut mbi,
-                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
-            );
-
-            if result == 0 {
-                break;
-            }
-
-            let is_target = mbi.Protect.0 & readable != 0 && mbi.State.0 == MEM_COMMIT;
-
-            let passes_type_filter =
-                is_target && should_scan_region(mbi.Type.0, exclude_mapped, exclude_image);
-
-            let passes_module_filter = if let Some(ref mod_regions) = module_regions {
-                !mod_regions.is_empty()
-                    && in_module_regions(mbi.BaseAddress as usize, mbi.RegionSize, mod_regions)
-            } else {
-                true
-            };
-
-            // Scan all readable committed memory
-            if passes_type_filter && passes_module_filter {
-                let mut buffer = vec![0u8; mbi.RegionSize];
+        for region in scan_regions {
+            let addr = region.base;
+            check_runtime(&runtime)?;
+            {
+                let mut buffer = vec![0u8; region.size];
                 let mut bytes_read = 0usize;
 
                 if ReadProcessMemory(
                     *handle,
                     addr as *const _,
                     buffer.as_mut_ptr() as *mut _,
-                    mbi.RegionSize,
+                    region.size,
                     Some(&mut bytes_read as *mut _),
                 )
                 .is_ok()
@@ -679,6 +709,9 @@ pub fn find_pattern(args: &Value) -> Result<Value, MemoricError> {
 
                     // Search for pattern
                     for i in 0..buffer.len().saturating_sub(pattern.len()) {
+                        if i % 4096 == 0 {
+                            check_runtime(&runtime)?;
+                        }
                         let matches = pattern.iter().enumerate().all(|(j, &expected)| {
                             expected.is_none() || buffer[i + j] == expected.unwrap()
                         });
@@ -689,8 +722,6 @@ pub fn find_pattern(args: &Value) -> Result<Value, MemoricError> {
                     }
                 }
             }
-
-            addr = (mbi.BaseAddress as usize) + mbi.RegionSize;
         }
 
         tracing::info!("Found {} addresses", addresses.len());
@@ -708,7 +739,8 @@ pub fn find_pattern(args: &Value) -> Result<Value, MemoricError> {
             "total_count": total_count,
             "offset": offset_param,
             "limit": limit,
-            "has_more": offset_param + paginated.len() < total_count
+            "has_more": offset_param + paginated.len() < total_count,
+            "region_cache": region_cache_report
         }))
     }
 }
@@ -716,9 +748,6 @@ pub fn find_pattern(args: &Value) -> Result<Value, MemoricError> {
 /// Pointer scan - find pointers that point to a target address
 pub fn pointer_scan(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-    use windows::Win32::System::Memory::{
-        VirtualQueryEx, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_READWRITE,
-    };
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
     };
@@ -727,6 +756,7 @@ pub fn pointer_scan(args: &Value) -> Result<Value, MemoricError> {
         .get("pid")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| MemoricError::MemoryAccess("Missing pid".to_string()))?;
+    let runtime = scanner_runtime(args)?;
     let target_address = args
         .get("target_address")
         .and_then(parse_address)
@@ -738,6 +768,7 @@ pub fn pointer_scan(args: &Value) -> Result<Value, MemoricError> {
         target_address,
         max_depth
     );
+    check_runtime(&runtime)?;
 
     unsafe {
         let handle = OpenProcess(
@@ -749,33 +780,22 @@ pub fn pointer_scan(args: &Value) -> Result<Value, MemoricError> {
         let handle = SafeHandle::new(handle);
 
         let mut pointers = Vec::new();
-        let mut addr = 0usize;
         let pointer_size = 8; // x64
+        let (scan_regions, region_cache_report, _skipped_regions) =
+            get_cached_scan_regions(pid, args, 0, PROTECT_WRITABLE, false, false, None)?;
 
-        loop {
-            let mut mbi = MEMORY_BASIC_INFORMATION::default();
-            let result = VirtualQueryEx(
-                *handle,
-                Some(addr as *const _),
-                &mut mbi,
-                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
-            );
-
-            if result == 0 {
-                break;
-            }
-
-            if mbi.Protect.0 & (PAGE_READWRITE.0 | PAGE_EXECUTE_READWRITE.0) != 0
-                && mbi.State.0 == MEM_COMMIT
+        for region in scan_regions {
+            let addr = region.base;
+            check_runtime(&runtime)?;
             {
-                let mut buffer = vec![0u8; mbi.RegionSize];
+                let mut buffer = vec![0u8; region.size];
                 let mut bytes_read = 0usize;
 
                 if ReadProcessMemory(
                     *handle,
                     addr as *const _,
                     buffer.as_mut_ptr() as *mut _,
-                    mbi.RegionSize,
+                    region.size,
                     Some(&mut bytes_read as *mut _),
                 )
                 .is_ok()
@@ -783,6 +803,9 @@ pub fn pointer_scan(args: &Value) -> Result<Value, MemoricError> {
                     buffer.truncate(bytes_read);
 
                     for i in (0..buffer.len().saturating_sub(pointer_size)).step_by(pointer_size) {
+                        if i % 4096 == 0 {
+                            check_runtime(&runtime)?;
+                        }
                         let ptr_value =
                             u64::from_ne_bytes(buffer[i..i + 8].try_into().unwrap_or([0; 8]));
 
@@ -792,14 +815,14 @@ pub fn pointer_scan(args: &Value) -> Result<Value, MemoricError> {
                     }
                 }
             }
-            addr = (mbi.BaseAddress as usize) + mbi.RegionSize;
         }
 
         Ok(serde_json::json!({
             "target_address": format!("0x{:016X}", target_address),
             "pointers": pointers,
             "count": pointers.len(),
-            "max_depth": max_depth
+            "max_depth": max_depth,
+            "region_cache": region_cache_report
         }))
     }
 }
@@ -810,10 +833,6 @@ pub fn pointer_scan(args: &Value) -> Result<Value, MemoricError> {
 /// Returns addresses + context bytes around each match
 pub fn ida_pattern_scan(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-    use windows::Win32::System::Memory::{
-        VirtualQueryEx, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
-        PAGE_EXECUTE_WRITECOPY, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
-    };
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
     };
@@ -822,6 +841,7 @@ pub fn ida_pattern_scan(args: &Value) -> Result<Value, MemoricError> {
         .get("pid")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| MemoricError::MemoryAccess("Missing pid".to_string()))?;
+    let runtime = scanner_runtime(args)?;
     let pattern_str = args
         .get("pattern")
         .or_else(|| args.get("signature"))
@@ -847,6 +867,7 @@ pub fn ida_pattern_scan(args: &Value) -> Result<Value, MemoricError> {
         pid,
         pattern_str
     );
+    check_runtime(&runtime)?;
 
     // Parse IDA pattern: supports ?? for wildcard byte, ?X and X? for nibble wildcards
     let parsed = parse_ida_pattern(pattern_str)?;
@@ -868,19 +889,23 @@ pub fn ida_pattern_scan(args: &Value) -> Result<Value, MemoricError> {
         let handle = SafeHandle::new(handle);
 
         let module_regions = module_name.map(|name| get_module_regions(*handle, name));
-        let readable = PAGE_READONLY.0
-            | PAGE_READWRITE.0
-            | PAGE_EXECUTE_READ.0
-            | PAGE_EXECUTE_READWRITE.0
-            | PAGE_WRITECOPY.0
-            | PAGE_EXECUTE_WRITECOPY.0;
+        let (scan_regions, region_cache_report, _skipped_regions) = get_cached_scan_regions(
+            pid,
+            args,
+            start_addr,
+            PROTECT_READABLE,
+            false,
+            false,
+            module_regions.as_deref(),
+        )?;
 
         let mut matches: Vec<serde_json::Value> = Vec::new();
-        let mut addr = start_addr;
         let mut timed_out = false;
         let mut scanned_bytes = 0u64;
 
-        loop {
+        for region in scan_regions {
+            let addr = region.base;
+            check_runtime(&runtime)?;
             if std::time::Instant::now() >= deadline {
                 timed_out = true;
                 break;
@@ -889,34 +914,15 @@ pub fn ida_pattern_scan(args: &Value) -> Result<Value, MemoricError> {
                 break;
             }
 
-            let mut mbi = MEMORY_BASIC_INFORMATION::default();
-            let result = VirtualQueryEx(
-                *handle,
-                Some(addr as *const _),
-                &mut mbi,
-                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
-            );
-            if result == 0 {
-                break;
-            }
-
-            let is_target = mbi.Protect.0 & readable != 0 && mbi.State.0 == MEM_COMMIT;
-            let passes_module = if let Some(ref regions) = module_regions {
-                !regions.is_empty()
-                    && in_module_regions(mbi.BaseAddress as usize, mbi.RegionSize, regions)
-            } else {
-                true
-            };
-
-            if is_target && passes_module {
-                let mut buffer = vec![0u8; mbi.RegionSize];
+            {
+                let mut buffer = vec![0u8; region.size];
                 let mut bytes_read = 0usize;
 
                 if ReadProcessMemory(
                     *handle,
                     addr as *const _,
                     buffer.as_mut_ptr() as *mut _,
-                    mbi.RegionSize,
+                    region.size,
                     Some(&mut bytes_read),
                 )
                 .is_ok()
@@ -925,6 +931,9 @@ pub fn ida_pattern_scan(args: &Value) -> Result<Value, MemoricError> {
                     scanned_bytes += bytes_read as u64;
 
                     for i in 0..buffer.len().saturating_sub(parsed.len()) {
+                        if i % 4096 == 0 {
+                            check_runtime(&runtime)?;
+                        }
                         if ida_match(&buffer[i..], &parsed) {
                             let found_addr = addr + i;
                             // Extract context
@@ -947,11 +956,6 @@ pub fn ida_pattern_scan(args: &Value) -> Result<Value, MemoricError> {
                     }
                 }
             }
-
-            addr = (mbi.BaseAddress as usize) + mbi.RegionSize;
-            if addr == 0 {
-                break;
-            }
         }
 
         Ok(serde_json::json!({
@@ -962,6 +966,7 @@ pub fn ida_pattern_scan(args: &Value) -> Result<Value, MemoricError> {
             "count": matches.len(),
             "scanned_bytes": scanned_bytes,
             "timed_out": timed_out,
+            "region_cache": region_cache_report,
             "message": format!("Found {} matches for pattern '{}'", matches.len(), pattern_str)
         }))
     }
@@ -973,17 +978,13 @@ pub fn stealth_pattern_scan(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE, OPEN_EXISTING,
     };
-    use windows::Win32::System::Memory::{
-        VirtualQueryEx, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
-        PAGE_READONLY, PAGE_READWRITE,
-    };
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION};
     use windows::Win32::System::IO::DeviceIoControl;
 
     let pid = args
         .get("pid")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| MemoricError::MemoryAccess("Missing pid".to_string()))?;
+    let runtime = scanner_runtime(args)?;
     let pattern_str = args
         .get("pattern")
         .or_else(|| args.get("signature"))
@@ -1005,6 +1006,7 @@ pub fn stealth_pattern_scan(args: &Value) -> Result<Value, MemoricError> {
         pattern_str,
         device_path
     );
+    check_runtime(&runtime)?;
 
     let parsed = parse_ida_pattern(pattern_str)?;
     if parsed.is_empty() {
@@ -1014,11 +1016,6 @@ pub fn stealth_pattern_scan(args: &Value) -> Result<Value, MemoricError> {
     let _ = crate::privilege::enable_debug_privilege(&serde_json::json!({}));
 
     unsafe {
-        // Open process just for VirtualQueryEx (region enumeration)
-        let proc_handle = OpenProcess(PROCESS_QUERY_INFORMATION, false, pid as u32)
-            .map_err(|e| MemoricError::WindowsApi(format!("OpenProcess for query: {}", e)))?;
-        let proc_handle = SafeHandle::new(proc_handle);
-
         // Open driver for reading
         let dev_w: Vec<u16> = device_path
             .encode_utf16()
@@ -1035,38 +1032,31 @@ pub fn stealth_pattern_scan(args: &Value) -> Result<Value, MemoricError> {
         )
         .map_err(|e| MemoricError::WindowsApi(format!("Cannot open driver: {}", e)))?;
 
-        let readable =
-            PAGE_READONLY.0 | PAGE_READWRITE.0 | PAGE_EXECUTE_READ.0 | PAGE_EXECUTE_READWRITE.0;
+        let (scan_regions, region_cache_report, _skipped_regions) =
+            get_cached_scan_regions(pid, args, 0, PROTECT_READABLE, false, false, None)?;
         let mut matches: Vec<serde_json::Value> = Vec::new();
-        let mut addr = 0usize;
         let mut scanned_bytes = 0u64;
 
-        loop {
+        for region in scan_regions {
+            check_runtime(&runtime)?;
             if matches.len() >= limit {
                 break;
             }
-
-            let mut mbi = MEMORY_BASIC_INFORMATION::default();
-            if VirtualQueryEx(
-                *proc_handle,
-                Some(addr as *const _),
-                &mut mbi,
-                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
-            ) == 0
-            {
-                break;
+            if region.size > 16 * 1024 * 1024 {
+                continue;
             }
 
-            if mbi.Protect.0 & readable != 0
-                && mbi.State.0 == MEM_COMMIT
-                && mbi.RegionSize <= 16 * 1024 * 1024
             {
+                let addr = region.base;
                 // Read via driver in chunks
-                let mut buffer = vec![0u8; mbi.RegionSize];
+                let mut buffer = vec![0u8; region.size];
                 let mut read_ok = true;
 
-                for offset in (0..mbi.RegionSize).step_by(8) {
-                    let remaining = (mbi.RegionSize - offset).min(8);
+                for offset in (0..region.size).step_by(8) {
+                    if offset % 4096 == 0 {
+                        check_runtime(&runtime)?;
+                    }
+                    let remaining = (region.size - offset).min(8);
                     let target = (addr + offset) as u64;
 
                     #[repr(C, packed)]
@@ -1105,8 +1095,11 @@ pub fn stealth_pattern_scan(args: &Value) -> Result<Value, MemoricError> {
                 }
 
                 if read_ok {
-                    scanned_bytes += mbi.RegionSize as u64;
+                    scanned_bytes += region.size as u64;
                     for i in 0..buffer.len().saturating_sub(parsed.len()) {
+                        if i % 4096 == 0 {
+                            check_runtime(&runtime)?;
+                        }
                         if ida_match(&buffer[i..], &parsed) {
                             matches.push(serde_json::json!({
                                 "address": format!("0x{:016X}", addr + i),
@@ -1118,11 +1111,6 @@ pub fn stealth_pattern_scan(args: &Value) -> Result<Value, MemoricError> {
                         }
                     }
                 }
-            }
-
-            addr = (mbi.BaseAddress as usize) + mbi.RegionSize;
-            if addr == 0 {
-                break;
             }
         }
 
@@ -1136,6 +1124,7 @@ pub fn stealth_pattern_scan(args: &Value) -> Result<Value, MemoricError> {
             "matches": matches,
             "count": matches.len(),
             "scanned_bytes": scanned_bytes,
+            "region_cache": region_cache_report,
             "message": format!("BYOVD stealth scan found {} matches", matches.len())
         }))
     }
@@ -1221,9 +1210,6 @@ fn ida_match(data: &[u8], pattern: &[PatternByte]) -> bool {
 /// Scan for values within a range [min, max]
 pub fn scan_range(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-    use windows::Win32::System::Memory::{
-        VirtualQueryEx, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_READWRITE,
-    };
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
     };
@@ -1232,6 +1218,7 @@ pub fn scan_range(args: &Value) -> Result<Value, MemoricError> {
         .get("pid")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| MemoricError::MemoryAccess("Missing pid".to_string()))?;
+    let runtime = scanner_runtime(args)?;
     let scan_type = args
         .get("scan_type")
         .and_then(|v| v.as_str())
@@ -1272,6 +1259,7 @@ pub fn scan_range(args: &Value) -> Result<Value, MemoricError> {
         min_val,
         max_val
     );
+    check_runtime(&runtime)?;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
@@ -1285,51 +1273,39 @@ pub fn scan_range(args: &Value) -> Result<Value, MemoricError> {
         let handle = SafeHandle::new(handle);
 
         let module_regions = module_name.map(|name| get_module_regions(*handle, name));
+        let (scan_regions, region_cache_report, _skipped_regions) = get_cached_scan_regions(
+            pid,
+            args,
+            start_address,
+            PROTECT_WRITABLE,
+            exclude_mapped,
+            exclude_image,
+            module_regions.as_deref(),
+        )?;
 
         let mut addresses = Vec::new();
         let mut session_data: Vec<(usize, Vec<u8>)> = Vec::new();
-        let mut addr = start_address;
         let mut timed_out = false;
         let mut last_address = 0usize;
 
-        loop {
+        for region in scan_regions {
+            let addr = region.base;
+            check_runtime(&runtime)?;
             if std::time::Instant::now() >= deadline {
                 timed_out = true;
                 last_address = addr;
                 break;
             }
 
-            let mut mbi = MEMORY_BASIC_INFORMATION::default();
-            if VirtualQueryEx(
-                *handle,
-                Some(addr as *const _),
-                &mut mbi,
-                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
-            ) == 0
             {
-                break;
-            }
-
-            let is_target = mbi.Protect.0 & (PAGE_READWRITE.0 | PAGE_EXECUTE_READWRITE.0) != 0
-                && mbi.State.0 == MEM_COMMIT;
-            let passes_type =
-                is_target && should_scan_region(mbi.Type.0, exclude_mapped, exclude_image);
-            let passes_mod = if let Some(ref regions) = module_regions {
-                !regions.is_empty()
-                    && in_module_regions(mbi.BaseAddress as usize, mbi.RegionSize, regions)
-            } else {
-                true
-            };
-
-            if passes_type && passes_mod {
-                let mut buffer = vec![0u8; mbi.RegionSize];
+                let mut buffer = vec![0u8; region.size];
                 let mut bytes_read = 0usize;
 
                 if ReadProcessMemory(
                     *handle,
                     addr as *const _,
                     buffer.as_mut_ptr() as *mut _,
-                    mbi.RegionSize,
+                    region.size,
                     Some(&mut bytes_read as *mut _),
                 )
                 .is_ok()
@@ -1337,6 +1313,9 @@ pub fn scan_range(args: &Value) -> Result<Value, MemoricError> {
                     buffer.truncate(bytes_read);
 
                     for i in 0..buffer.len().saturating_sub(4) {
+                        if i % 4096 == 0 {
+                            check_runtime(&runtime)?;
+                        }
                         let in_range = match scan_type {
                             "int" => {
                                 let v = i32::from_ne_bytes([
@@ -1367,8 +1346,6 @@ pub fn scan_range(args: &Value) -> Result<Value, MemoricError> {
                     }
                 }
             }
-
-            addr = (mbi.BaseAddress as usize) + mbi.RegionSize;
         }
 
         if let Ok(mut state) = SCAN_STATE.lock() {
@@ -1395,6 +1372,7 @@ pub fn scan_range(args: &Value) -> Result<Value, MemoricError> {
             "timed_out": timed_out,
             "last_address": format!("0x{:016X}", last_address),
             "scan_type": scan_type,
+            "region_cache": region_cache_report,
             "range": { "min": min_val, "max": max_val }
         }))
     }
@@ -1411,6 +1389,7 @@ pub fn scan_delta(args: &Value) -> Result<Value, MemoricError> {
         .get("pid")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| MemoricError::MemoryAccess("Missing pid".to_string()))?;
+    let runtime = scanner_runtime(args)?;
     let delta = args
         .get("delta")
         .and_then(|v| v.as_f64())
@@ -1428,6 +1407,7 @@ pub fn scan_delta(args: &Value) -> Result<Value, MemoricError> {
         delta,
         direction
     );
+    check_runtime(&runtime)?;
 
     let session = {
         let state = SCAN_STATE
@@ -1453,6 +1433,7 @@ pub fn scan_delta(args: &Value) -> Result<Value, MemoricError> {
         let mut new_session_data: Vec<(usize, Vec<u8>)> = Vec::new();
 
         for (addr, old_bytes) in &session.addresses {
+            check_runtime(&runtime)?;
             let mut new_buf = vec![0u8; session.value_size];
             let mut bytes_read = 0usize;
 
@@ -1525,10 +1506,6 @@ pub fn scan_delta(args: &Value) -> Result<Value, MemoricError> {
 /// Dedicated string scanner with ANSI/Unicode support and wildcard matching
 pub fn scan_string(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-    use windows::Win32::System::Memory::{
-        VirtualQueryEx, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
-        PAGE_EXECUTE_WRITECOPY, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
-    };
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
     };
@@ -1537,6 +1514,7 @@ pub fn scan_string(args: &Value) -> Result<Value, MemoricError> {
         .get("pid")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| MemoricError::MemoryAccess("Missing pid".to_string()))?;
+    let runtime = scanner_runtime(args)?;
     let pattern = args
         .get("pattern")
         .or_else(|| args.get("signature"))
@@ -1572,6 +1550,7 @@ pub fn scan_string(args: &Value) -> Result<Value, MemoricError> {
         encoding,
         case_insensitive
     );
+    check_runtime(&runtime)?;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
@@ -1588,13 +1567,6 @@ pub fn scan_string(args: &Value) -> Result<Value, MemoricError> {
         .flat_map(|c| c.to_le_bytes())
         .collect();
 
-    let readable = PAGE_READONLY.0
-        | PAGE_READWRITE.0
-        | PAGE_EXECUTE_READ.0
-        | PAGE_EXECUTE_READWRITE.0
-        | PAGE_WRITECOPY.0
-        | PAGE_EXECUTE_WRITECOPY.0;
-
     unsafe {
         let handle = OpenProcess(
             PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
@@ -1605,39 +1577,34 @@ pub fn scan_string(args: &Value) -> Result<Value, MemoricError> {
         let handle = SafeHandle::new(handle);
 
         let mut results = Vec::new();
-        let mut addr = 0usize;
         let mut timed_out = false;
+        let (scan_regions, region_cache_report, _skipped_regions) = get_cached_scan_regions(
+            pid,
+            args,
+            0,
+            PROTECT_READABLE,
+            exclude_mapped,
+            exclude_image,
+            None,
+        )?;
 
-        loop {
+        for region in scan_regions {
+            let addr = region.base;
+            check_runtime(&runtime)?;
             if std::time::Instant::now() >= deadline {
                 timed_out = true;
                 break;
             }
 
-            let mut mbi = MEMORY_BASIC_INFORMATION::default();
-            if VirtualQueryEx(
-                *handle,
-                Some(addr as *const _),
-                &mut mbi,
-                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
-            ) == 0
             {
-                break;
-            }
-
-            let is_target = mbi.Protect.0 & readable != 0 && mbi.State.0 == MEM_COMMIT;
-            let passes_type =
-                is_target && should_scan_region(mbi.Type.0, exclude_mapped, exclude_image);
-
-            if passes_type {
-                let mut buffer = vec![0u8; mbi.RegionSize];
+                let mut buffer = vec![0u8; region.size];
                 let mut bytes_read = 0usize;
 
                 if ReadProcessMemory(
                     *handle,
                     addr as *const _,
                     buffer.as_mut_ptr() as *mut _,
-                    mbi.RegionSize,
+                    region.size,
                     Some(&mut bytes_read as *mut _),
                 )
                 .is_ok()
@@ -1652,6 +1619,9 @@ pub fn scan_string(args: &Value) -> Result<Value, MemoricError> {
                             buffer.clone()
                         };
                         for i in 0..search_buf.len().saturating_sub(ansi_pattern.len()) {
+                            if i % 4096 == 0 {
+                                check_runtime(&runtime)?;
+                            }
                             if search_buf[i..i + ansi_pattern.len()] == ansi_pattern[..] {
                                 let found_addr = addr + i;
                                 // Read a bit more context
@@ -1675,6 +1645,9 @@ pub fn scan_string(args: &Value) -> Result<Value, MemoricError> {
                     if encoding == "unicode" || encoding == "both" {
                         for i in (0..buffer.len().saturating_sub(unicode_pattern.len())).step_by(2)
                         {
+                            if i % 4096 == 0 {
+                                check_runtime(&runtime)?;
+                            }
                             let mut matched = true;
                             for j in 0..unicode_pattern.len() {
                                 let buf_byte = if case_insensitive {
@@ -1714,8 +1687,6 @@ pub fn scan_string(args: &Value) -> Result<Value, MemoricError> {
                     }
                 }
             }
-
-            addr = (mbi.BaseAddress as usize) + mbi.RegionSize;
         }
 
         let total_count = results.len();
@@ -1728,6 +1699,7 @@ pub fn scan_string(args: &Value) -> Result<Value, MemoricError> {
             "pattern": pattern,
             "encoding": encoding,
             "case_insensitive": case_insensitive,
+            "region_cache": region_cache_report,
             "timed_out": timed_out
         }))
     }
@@ -1736,9 +1708,6 @@ pub fn scan_string(args: &Value) -> Result<Value, MemoricError> {
 /// Alignment-aware memory scan: scan for values at aligned addresses only (faster, reduces noise)
 pub fn scan_aligned(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-    use windows::Win32::System::Memory::{
-        VirtualQueryEx, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_READWRITE,
-    };
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
     };
@@ -1747,6 +1716,7 @@ pub fn scan_aligned(args: &Value) -> Result<Value, MemoricError> {
         .get("pid")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| MemoricError::MemoryAccess("Missing pid".to_string()))?;
+    let runtime = scanner_runtime(args)?;
     let scan_type = args
         .get("scan_type")
         .and_then(|v| v.as_str())
@@ -1791,6 +1761,7 @@ pub fn scan_aligned(args: &Value) -> Result<Value, MemoricError> {
         scan_type,
         alignment
     );
+    check_runtime(&runtime)?;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
@@ -1804,10 +1775,18 @@ pub fn scan_aligned(args: &Value) -> Result<Value, MemoricError> {
         let handle = SafeHandle::new(handle);
 
         let module_regions = module_name.map(|name| get_module_regions(*handle, name));
+        let (scan_regions, region_cache_report, _skipped_regions) = get_cached_scan_regions(
+            pid,
+            args,
+            start_address,
+            PROTECT_WRITABLE,
+            exclude_mapped,
+            exclude_image,
+            module_regions.as_deref(),
+        )?;
 
         let mut addresses = Vec::new();
         let mut session_data: Vec<(usize, Vec<u8>)> = Vec::new();
-        let mut addr = start_address;
         let mut timed_out = false;
         let mut last_address = 0usize;
 
@@ -1893,44 +1872,24 @@ pub fn scan_aligned(args: &Value) -> Result<Value, MemoricError> {
             }
         };
 
-        loop {
+        for region in scan_regions {
+            let addr = region.base;
+            check_runtime(&runtime)?;
             if std::time::Instant::now() >= deadline {
                 timed_out = true;
                 last_address = addr;
                 break;
             }
 
-            let mut mbi = MEMORY_BASIC_INFORMATION::default();
-            if VirtualQueryEx(
-                *handle,
-                Some(addr as *const _),
-                &mut mbi,
-                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
-            ) == 0
             {
-                break;
-            }
-
-            let is_target = mbi.Protect.0 & (PAGE_READWRITE.0 | PAGE_EXECUTE_READWRITE.0) != 0
-                && mbi.State.0 == MEM_COMMIT;
-            let passes_type =
-                is_target && should_scan_region(mbi.Type.0, exclude_mapped, exclude_image);
-            let passes_mod = if let Some(ref regions) = module_regions {
-                !regions.is_empty()
-                    && in_module_regions(mbi.BaseAddress as usize, mbi.RegionSize, regions)
-            } else {
-                true
-            };
-
-            if passes_type && passes_mod {
-                let mut buffer = vec![0u8; mbi.RegionSize];
+                let mut buffer = vec![0u8; region.size];
                 let mut bytes_read = 0usize;
 
                 if ReadProcessMemory(
                     *handle,
                     addr as *const _,
                     buffer.as_mut_ptr() as *mut _,
-                    mbi.RegionSize,
+                    region.size,
                     Some(&mut bytes_read as *mut _),
                 )
                 .is_ok()
@@ -1947,6 +1906,9 @@ pub fn scan_aligned(args: &Value) -> Result<Value, MemoricError> {
 
                     let mut i = first_aligned;
                     while i + value_size <= buffer.len() {
+                        if i % 4096 == 0 {
+                            check_runtime(&runtime)?;
+                        }
                         if buffer[i..i + value_size] == target_bytes[..] {
                             let found_addr = addr + i;
                             addresses.push(serde_json::json!({
@@ -1959,8 +1921,6 @@ pub fn scan_aligned(args: &Value) -> Result<Value, MemoricError> {
                     }
                 }
             }
-
-            addr = (mbi.BaseAddress as usize) + mbi.RegionSize;
         }
 
         // Store in session
@@ -1987,6 +1947,7 @@ pub fn scan_aligned(args: &Value) -> Result<Value, MemoricError> {
             "alignment": alignment,
             "value_size": value_size,
             "timed_out": timed_out,
+            "region_cache": region_cache_report,
             "resume_address": if timed_out { format!("0x{:016X}", last_address) } else { "".to_string() }
         }))
     }
@@ -1995,9 +1956,6 @@ pub fn scan_aligned(args: &Value) -> Result<Value, MemoricError> {
 /// Multi-value scan: scan for any of multiple values simultaneously (e.g. find all health values 80,90,100)
 pub fn scan_multi_value(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
-    use windows::Win32::System::Memory::{
-        VirtualQueryEx, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_READWRITE,
-    };
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
     };
@@ -2006,6 +1964,7 @@ pub fn scan_multi_value(args: &Value) -> Result<Value, MemoricError> {
         .get("pid")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| MemoricError::MemoryAccess("Missing pid".to_string()))?;
+    let runtime = scanner_runtime(args)?;
     let scan_type = args
         .get("scan_type")
         .and_then(|v| v.as_str())
@@ -2047,6 +2006,7 @@ pub fn scan_multi_value(args: &Value) -> Result<Value, MemoricError> {
         scan_type,
         values_arr.len()
     );
+    check_runtime(&runtime)?;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
@@ -2130,51 +2090,39 @@ pub fn scan_multi_value(args: &Value) -> Result<Value, MemoricError> {
         let handle = SafeHandle::new(handle);
 
         let module_regions = module_name.map(|name| get_module_regions(*handle, name));
+        let (scan_regions, region_cache_report, _skipped_regions) = get_cached_scan_regions(
+            pid,
+            args,
+            start_address,
+            PROTECT_WRITABLE,
+            exclude_mapped,
+            exclude_image,
+            module_regions.as_deref(),
+        )?;
 
         let mut results = Vec::new();
         let mut session_data: Vec<(usize, Vec<u8>)> = Vec::new();
-        let mut addr = start_address;
         let mut timed_out = false;
         let mut last_address = 0usize;
 
-        loop {
+        for region in scan_regions {
+            let addr = region.base;
+            check_runtime(&runtime)?;
             if std::time::Instant::now() >= deadline {
                 timed_out = true;
                 last_address = addr;
                 break;
             }
 
-            let mut mbi = MEMORY_BASIC_INFORMATION::default();
-            if VirtualQueryEx(
-                *handle,
-                Some(addr as *const _),
-                &mut mbi,
-                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
-            ) == 0
             {
-                break;
-            }
-
-            let is_target = mbi.Protect.0 & (PAGE_READWRITE.0 | PAGE_EXECUTE_READWRITE.0) != 0
-                && mbi.State.0 == MEM_COMMIT;
-            let passes_type =
-                is_target && should_scan_region(mbi.Type.0, exclude_mapped, exclude_image);
-            let passes_mod = if let Some(ref regions) = module_regions {
-                !regions.is_empty()
-                    && in_module_regions(mbi.BaseAddress as usize, mbi.RegionSize, regions)
-            } else {
-                true
-            };
-
-            if passes_type && passes_mod {
-                let mut buffer = vec![0u8; mbi.RegionSize];
+                let mut buffer = vec![0u8; region.size];
                 let mut bytes_read = 0usize;
 
                 if ReadProcessMemory(
                     *handle,
                     addr as *const _,
                     buffer.as_mut_ptr() as *mut _,
-                    mbi.RegionSize,
+                    region.size,
                     Some(&mut bytes_read as *mut _),
                 )
                 .is_ok()
@@ -2182,6 +2130,9 @@ pub fn scan_multi_value(args: &Value) -> Result<Value, MemoricError> {
                     buffer.truncate(bytes_read);
 
                     for i in 0..buffer.len().saturating_sub(value_size) {
+                        if i % 4096 == 0 {
+                            check_runtime(&runtime)?;
+                        }
                         let slice = &buffer[i..i + value_size];
                         for (target_bytes, target_label) in &targets {
                             if slice == target_bytes.as_slice() {
@@ -2198,8 +2149,6 @@ pub fn scan_multi_value(args: &Value) -> Result<Value, MemoricError> {
                     }
                 }
             }
-
-            addr = (mbi.BaseAddress as usize) + mbi.RegionSize;
         }
 
         // Store in session
@@ -2225,7 +2174,47 @@ pub fn scan_multi_value(args: &Value) -> Result<Value, MemoricError> {
             "scan_type": scan_type,
             "values_searched": values_arr.len(),
             "timed_out": timed_out,
+            "region_cache": region_cache_report,
             "resume_address": if timed_out { format!("0x{:016X}", last_address) } else { "".to_string() }
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn scan_exact_reports_region_cache_reuse_for_current_process() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let mut data = vec![0x71u8, 0x72, 0x73, 0x74];
+        let pid = std::process::id() as u64;
+
+        let base_args = json!({
+            "pid": pid,
+            "value": 0x74737271i64,
+            "scan_type": "int",
+            "start_address": data.as_mut_ptr() as u64,
+            "limit": 4,
+            "region_cache": "clear"
+        });
+        let first = scan_exact(&base_args).expect("first scan should query regions");
+        assert_eq!(first["region_cache"]["enabled"], true);
+        assert_eq!(first["region_cache"]["source"], "refresh");
+
+        let second = scan_exact(&json!({
+            "pid": pid,
+            "value": 0x74737271i64,
+            "scan_type": "int",
+            "start_address": data.as_mut_ptr() as u64,
+            "limit": 4
+        }))
+        .expect("second scan should reuse fresh region cache");
+        assert_eq!(second["region_cache"]["source"], "cache");
+        assert_eq!(second["region_cache"]["reused"], true);
     }
 }

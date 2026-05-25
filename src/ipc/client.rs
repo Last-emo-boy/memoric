@@ -19,11 +19,21 @@ pub struct PipeClient {
     handle: HANDLE,
 }
 
+// Windows HANDLE values are process-wide kernel handles. The worker uses this
+// across two threads only for a duplex pipe, with writes serialized by a
+// caller-owned mutex and reads kept on the main worker loop.
+unsafe impl Send for PipeClient {}
+unsafe impl Sync for PipeClient {}
+
 impl PipeClient {
     /// Connect to the Named Pipe server (Proxy side)
     pub fn connect() -> Result<Self> {
+        Self::connect_with_name(PIPE_NAME)
+    }
+
+    pub(crate) fn connect_with_name(pipe_name: &str) -> Result<Self> {
         unsafe {
-            let pipe_name: Vec<u16> = format!("{}\0", PIPE_NAME).encode_utf16().collect();
+            let pipe_name_wide: Vec<u16> = format!("{}\0", pipe_name).encode_utf16().collect();
 
             let desired_access = FILE_READ_DATA.0
                 | FILE_WRITE_DATA.0
@@ -31,10 +41,10 @@ impl PipeClient {
                 | FILE_WRITE_ATTRIBUTES.0
                 | 0x00100000; // SYNCHRONIZE
 
-            tracing::info!("Connecting to Named Pipe: {}", PIPE_NAME);
+            tracing::info!("Connecting to Named Pipe: {}", pipe_name);
 
             let handle = CreateFileW(
-                windows::core::PCWSTR(pipe_name.as_ptr()),
+                windows::core::PCWSTR(pipe_name_wide.as_ptr()),
                 desired_access,
                 FILE_SHARE_MODE(0),
                 None,

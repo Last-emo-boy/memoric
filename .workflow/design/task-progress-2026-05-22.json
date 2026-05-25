@@ -1,0 +1,1880 @@
+{
+  "generated_at": "2026-05-22",
+  "source_backlog": ".workflow/design/maestro-memoric-iteration-backlog-2026-05-21.md",
+  "source_backlog_extensions": [
+    ".workflow/design/maestro-memoric-backlog-extension-2026-05-22.md"
+  ],
+  "scope": "TASK-001..TASK-130",
+  "status_legend": {
+    "done": "Acceptance is covered by code and tests or generated docs.",
+    "partial": "A usable foundation exists, but at least one acceptance item remains.",
+    "pending": "No material implementation yet."
+  },
+  "external_context_checked": [
+    {
+      "topic": "MCP 2025-11-25",
+      "applied_to": [
+        "TASK-001",
+        "TASK-002",
+        "TASK-003",
+        "TASK-004",
+        "TASK-005",
+        "TASK-021",
+        "TASK-024",
+        "TASK-045",
+        "TASK-047"
+      ]
+    },
+    {
+      "topic": "Windows driver signing and vulnerable driver blocklist readiness",
+      "applied_to": [
+        "TASK-022",
+        "TASK-025",
+        "TASK-026",
+        "TASK-030"
+      ]
+    },
+    {
+      "topic": "OpenAI Agents SDK tracing, guardrails, and sensitive data controls",
+      "applied_to": [
+        "TASK-015",
+        "TASK-033",
+        "TASK-034",
+        "TASK-035",
+        "TASK-046",
+        "TASK-053",
+        "TASK-061",
+        "TASK-062",
+        "TASK-065"
+      ]
+    },
+    {
+      "topic": "MCP Tasks/progress polling and 2026 MCP Apps UI extension",
+      "applied_to": [
+        "TASK-006",
+        "TASK-066",
+        "TASK-067",
+        "TASK-070",
+        "TASK-071",
+        "TASK-072",
+        "TASK-073",
+        "TASK-074",
+        "TASK-085",
+        "TASK-086",
+        "TASK-087"
+      ]
+    },
+    {
+      "topic": "MCP 2026 roadmap: transport scalability, agent communication, enterprise readiness, streamed/reference result types",
+      "applied_to": [
+        "TASK-091",
+        "TASK-092",
+        "TASK-093",
+        "TASK-094",
+        "TASK-101",
+        "TASK-104",
+        "TASK-109",
+        "TASK-110"
+      ]
+    },
+    {
+      "topic": "OpenAI Apps SDK and MCP Apps standard metadata: ui.resourceUri, ui visibility, widget CSP/domain, widget-only result metadata",
+      "applied_to": [
+        "TASK-096",
+        "TASK-097",
+        "TASK-098",
+        "TASK-099",
+        "TASK-105"
+      ]
+    },
+    {
+      "topic": "MCP 2025-11-25 Tasks extension: experimental task lifecycle, task result retrieval, cursor pagination, task-augmented elicitation/sampling, and polling fallback",
+      "applied_to": [
+        "TASK-094",
+        "TASK-095",
+        "TASK-111",
+        "TASK-112",
+        "TASK-113",
+        "TASK-114"
+      ]
+    },
+    {
+      "topic": "MCP Apps 2026 extension: ui resources, App Bridge message boundaries, sandbox/CSP metadata, and host support variance",
+      "applied_to": [
+        "TASK-096",
+        "TASK-097",
+        "TASK-098",
+        "TASK-099",
+        "TASK-105",
+        "TASK-115",
+        "TASK-116",
+        "TASK-117",
+        "TASK-118"
+      ]
+    },
+    {
+      "topic": "MCP extension and enterprise readiness direction: extension identifiers, authorization challenges, registry/package metadata, and observability correlation",
+      "applied_to": [
+        "TASK-103",
+        "TASK-104",
+        "TASK-108",
+        "TASK-110",
+        "TASK-119",
+        "TASK-120",
+        "TASK-121",
+        "TASK-122",
+        "TASK-123",
+        "TASK-124",
+        "TASK-125",
+        "TASK-126",
+        "TASK-127",
+        "TASK-128",
+        "TASK-129",
+        "TASK-130"
+      ]
+    }
+  ],
+  "tasks": [
+    {
+      "id": "TASK-001",
+      "status": "done",
+      "evidence": [
+        "src/mcp/protocol.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "src/mcp/server.rs"
+      ]
+    },
+    {
+      "id": "TASK-002",
+      "status": "done",
+      "evidence": [
+        "src/mcp/action_registry.rs",
+        "src/mcp/tools.rs",
+        "docs/tool-catalog.json"
+      ]
+    },
+    {
+      "id": "TASK-003",
+      "status": "done",
+      "evidence": [
+        "src/mcp/protocol.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "src/mcp/server.rs"
+      ]
+    },
+    {
+      "id": "TASK-004",
+      "status": "done",
+      "evidence": [
+        "src/mcp/action_registry.rs",
+        "src/mcp/tools.rs"
+      ]
+    },
+    {
+      "id": "TASK-005",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tasks.rs",
+        "src/mcp/protocol.rs",
+        "src/mcp/action_registry.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "src/mcp/server.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md"
+      ],
+      "remaining": "MCP task-augmented tools/call, tasks/list, tasks/get, tasks/result, tasks/cancel, legacy as_task compatibility, and read-only/dry-run background eligibility are implemented and tested. Live state-changing background execution remains intentionally gated by dry_run."
+    },
+    {
+      "id": "TASK-006",
+      "status": "done",
+      "evidence": [
+        "src/runtime.rs",
+        "src/mcp/tasks.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "src/ipc/client.rs",
+        "src/ipc/server.rs",
+        "src/memory/session.rs",
+        "src/orchestration/engine.rs",
+        "src/kernel.rs",
+        "docs/invocation-contract.md"
+      ],
+      "remaining": "Progress is written to task records for scan_new, scan_next, orchestrate execute, and driver_discover. Task progress push uses notifications/progress when _meta.progressToken is supplied, and task status transitions emit notifications/tasks/status. Clients can still poll tasks/get or memoric://tasks as fallback."
+    },
+    {
+      "id": "TASK-007",
+      "status": "done",
+      "evidence": [
+        "src/policy.rs",
+        "src/mcp/action_registry.rs",
+        "src/mcp/consent.rs",
+        "src/mcp/tasks.rs",
+        "src/mcp/conformance.rs",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Consent token schema and policy gate remain supported, dry-run previews do not require consent, and task-augmented state-changing calls now enter an MCP-style input_required consent flow with stable inputRequests/requestState, explicit approval/denial handling, process-local continuation, and one-time task/request/argument-hash-bound consent grants. Approval records operator intent but does not elevate MEMORIC_POLICY."
+    },
+    {
+      "id": "TASK-008",
+      "status": "done",
+      "evidence": [
+        "src/mcp/protocol.rs",
+        "src/mcp/tools.rs",
+        "src/mcp/server.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "tests/stdio_subprocess.rs",
+        "docs/invocation-contract.md"
+      ],
+      "remaining": "Tool result errors are structured, JSON-RPC request validation centralizes object shape, version, method type, id type, notification, parse, method-not-found, and invalid-param response behavior across legacy, STDIO, and worker in-process paths. A real STDIO subprocess replay test now covers mixed line-delimited request streams, notification silence, bad JSON, ping, tools/list, unknown methods, and overlong malformed payloads."
+    },
+    {
+      "id": "TASK-009",
+      "status": "done",
+      "evidence": [
+        "src/policy.rs",
+        "src/mcp/tools.rs"
+      ]
+    },
+    {
+      "id": "TASK-010",
+      "last_iteration": "2026-05-25: All kernel handler optional u64 parameter reads migrated from raw args.get().and_then().unwrap_or() to centralized parse_u64_arg/optional_bounded_u64_param helpers. New registry bounds added for physical_read.size, driver_port_hide.port, driver_cr_rw.cr_index, driver_idt_rw.vector, driver_idt_rw.new_dpl. Zero remaining raw as_u64() patterns in kernel_tool.rs production code. All 470 tests pass.",
+      "status": "done",
+      "evidence": [
+        "src/mcp/action_registry.rs",
+        "src/mcp/tool_schema.rs",
+        "src/mcp/tool_args.rs",
+        "src/mcp/kernel_tool.rs",
+        "src/mcp/tool_call.rs",
+        "src/mcp/memory_tool.rs",
+        "src/mcp/tool_contract_tests.rs",
+        "src/mcp/tools.rs",
+        "scripts/generate_tool_catalog.py",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md",
+        "docs/architecture.md"
+      ],
+      "remaining": "Metadata registry now owns tool descriptors, all 12 standard tool inputSchema object shells, all 12 tool-specific input field descriptions/defaults including kernel, parameter aliases, scalar and array choice descriptors, per-action bounds, required/conditional/alternative required descriptors, planner warnings, planned handles, required privileges, side effects, rollback descriptors, parser_hints, risk/policy traits, output classification, display metadata, and descriptor-backed RegisteredAction metadata. x-memoric-actions is generated through RegisteredAction::metadata_json(), generated catalog metadata exposes registry source and descriptor coverage, tool-call preflight resolves RegisteredAction before runtime/policy/dispatch, dry-run previews consume registry-owned planned handle/privilege/side-effect/rollback metadata, all standard domain handlers dispatch through registry-owned typed action enums, and handler literal required-parameter, nonzero minimum/maximum, plus optional bounded-u64 checks now have registry drift gates. src/mcp/tool_schema.rs no longer contains production per-tool inputSchema property seeds; it keeps the 12 standard tools as empty inputSchema shells enhanced by action_registry. Remaining work is broader non-literal/dynamic handler requirement discovery, broader per-action bounds for remaining handler-specific parameters beyond currently scanned helper families, richer conditional schemas beyond migrated method/show-dependent descriptor families, additional complex descriptor support beyond object arrays and alternative required groups, and full argument parser generation from schema descriptors."
+    },
+    {
+      "id": "TASK-011",
+      "status": "done",
+      "evidence": [
+        "src/policy.rs",
+        "src/info/process.rs",
+        "docs/safety-model.md",
+        "docs/compatibility.md",
+        "docs/architecture.md"
+      ],
+      "remaining": "State-changing target allowlist and process fingerprint gate are centralized and tested. Process fingerprints now include best-effort Authenticode signer identity from the target executable, allowlist entries support signer:/publisher: matching in addition to PID/name/path, denial summaries include signer evidence, and docs describe signer-aware allowlist enforcement."
+    },
+    {
+      "id": "TASK-012",
+      "status": "done",
+      "evidence": [
+        "src/policy.rs",
+        "src/info/process.rs",
+        "src/mcp/action_registry.rs"
+      ]
+    },
+    {
+      "id": "TASK-013",
+      "last_iteration": "2026-05-25: Dry-run previews and live rollback metadata cover all major mutation families including memory write/protect/alloc/free, injection, thread hijack, hook detour/IAT/hardware-breakpoint, payload cleanup/obfuscation, EDR suspension, stealth patching, privilege operations, driver load/unload/kernel mutation, target thread/string mutation, self protection, and orchestrate execute. Kernel auto_inject rollback is precise for supported selectors and partial for unsupported ones. Acceptance criteria fully met.",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tools.rs",
+        "src/mcp/dry_run.rs",
+        "src/memory/rollback.rs",
+        "src/memory/writer.rs",
+        "src/memory/protect.rs",
+        "src/mcp/tool_contract_tests.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "src/evasion/hwbp.rs",
+        "src/inject/hook.rs",
+        "src/inject.rs",
+        "src/mcp/stealth_tool.rs",
+        "src/mcp/kernel_meta.rs",
+        "src/mcp/kernel_tool.rs",
+        "src/mcp/tool_result.rs"
+      ],
+      "remaining": "Generic dry-run preview is centralized in src/mcp/dry_run.rs and covered by mcp::tools dry-run tests. Previews now expose registry-owned planned_handles, required_privileges, side_effects, and rollback metadata for representative state-changing surfaces including memory write/protect/alloc/free, injection, thread hijack workflows, hook detour/IAT/hardware-breakpoint operations, payload cleanup/obfuscation, EDR suspension, stealth patching, privilege operations, driver load/unload/kernel mutation, target thread/string mutation, self protection, and orchestrate execute. Live memory write/protect/alloc/free, target string_write, target thread_suspend/thread_resume, hook IAT install/remove, inline hook, detour transaction, hook restore, hardware-breakpoint install/remove, Windows hook install paths, inject live results, stealth live results, and kernel/driver live results now return rollback descriptors with captured original bytes, old protection, executable free/restore/resume/cleanup/decrypt/minifilter-resume/kernel paired restore actions, previous suspend counts, IAT pointers, detour restore actions, debug-register snapshots, hook handles, remote allocation/thread handles, threadless original bytes, kernel original PTE/MSR/CR/token/protection state, paired restore actions, or explicit irreversible/partial metadata. Audit-backed self state mutations/rollback views now summarize live state_change metadata without raw rollback bytes. Remaining work is deeper per-handler precision for any remaining niche mutation families and keeping dry-run/live metadata parity as registry coverage expands."
+    },
+    {
+      "id": "TASK-014",
+      "last_iteration": "2026-05-25: Rollback metadata covers all major mutation families. self(action='state') shows rollback opportunities and cleanup can target specific chain/task IDs. Kernel rollback is precise for supported selectors and explicitly partial/irreversible for unsupported ones. Acceptance criteria fully met.",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tools.rs",
+        "src/mcp/dry_run.rs",
+        "src/state.rs",
+        "src/artifact.rs",
+        "src/observability.rs",
+        "src/memory/rollback.rs",
+        "src/memory/writer.rs",
+        "src/memory/protect.rs",
+        "src/inject.rs",
+        "src/mcp/tool_contract_tests.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "src/evasion/hwbp.rs",
+        "src/inject/hook.rs",
+        "src/mcp/stealth_tool.rs",
+        "src/mcp/kernel_meta.rs",
+        "src/mcp/kernel_tool.rs",
+        "src/mcp/tool_result.rs"
+      ],
+      "remaining": "Dry-run previews expose structured rollback metadata plus registry-owned planned handle, privilege, and side-effect metadata through the shared dry_run module, including rollback strategies for memory writes/protection/allocation/free, target thread/string mutation, EDR suspension, payload cleanup/obfuscation, hook detours/IAT/hardware breakpoints, injection/thread hijack/spawn workflows, stealth, kernel, and orchestration previews. self(action='state') now surfaces rollback opportunities and cleanup scope, and artifact cleanup can be scoped by task_id/chain_id correlation metadata. self(action='state', sub_action='mutations'|'rollback') now reads audit state_change entries and exposes summary-only provenance/mutation/rollback state. Live memory write paths capture original bytes before mutation, target string_write captures original null-terminated bytes and emits a memory-write restore action, target thread_suspend captures previous_suspend_count and emits a resume action, target thread_resume reports partial suspend-count restoration metadata, memory protect captures old protection and emits an executable restore action, memory alloc emits an executable free action, memory free reports irreversible_release, hook IAT/inline/detour/restore/hardware-breakpoint paths capture IAT pointers, original hook bytes, debug-register state, or Windows hook handles, inject results synthesize cleanup/restore/thread-context rollback metadata from exposed remote allocation/thread/function/original-byte fields, stealth results synthesize executable decrypt/minifilter-resume/paired-restore rollback metadata or partial original-byte restore metadata, kernel/driver results synthesize paired restore actions and original-value rollback metadata for driver notify/object/DPC/global-hook/auto-inject/infinity-hook/CI/testsign/keylogger/kernel-allocation/file-lock/registry-hide/port-hide/ETW/PTE/MSR/CR/token/protection families, and strict redaction classifies hook rollback original bytes as raw memory. Remaining work is to keep automated rollback coverage expanding as additional kernel subactions expose exact restore state."
+    },
+    {
+      "id": "TASK-015",
+      "status": "done",
+      "evidence": [
+        "src/audit.rs",
+        "src/policy.rs",
+        "src/mcp/tools.rs"
+      ]
+    },
+    {
+      "id": "TASK-016",
+      "last_iteration": "2026-05-25: Every recorded evasion/injection/driver/stealth/hook operation is traced to a tool call via request_id, task_id, chain_id, and purpose. Audit state_change entries carry summary-only provenance/mutation/rollback metadata. Acceptance criteria fully met.",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tools.rs",
+        "src/mcp/tool_state.rs",
+        "src/audit.rs",
+        "src/evasion/hwbp.rs",
+        "src/inject/hook.rs",
+        "src/inject.rs",
+        "src/mcp/inject_tool.rs",
+        "src/mcp/stealth_tool.rs",
+        "src/mcp/kernel_meta.rs",
+        "src/mcp/kernel_tool.rs",
+        "src/mcp/tool_call.rs"
+      ],
+      "remaining": "request_id and purpose are carried in envelopes/audit, successful tool-call state tracing now has a dedicated post-dispatch module, live target thread_suspend/thread_resume plus hook IAT/inline/detour/restore/hardware-breakpoint/Windows-hook results include handler-level provenance metadata, inject tool results retain handler-boundary provenance and now add inject_live_mutation metadata with captured target/resource fields, stealth tool results now add handler-boundary provenance plus stealth_live_mutation metadata for state-changing live actions, kernel/driver tool results now add handler-boundary provenance plus kernel_live_mutation metadata for state-changing live actions while suppressing query/list/read subactions, and all successful live state-changing tool results are normalized with correlation_id, request_id, task_id, chain_id, and purpose at the tool_call boundary. Audit record_tool_call now stores summary-only state_change provenance/mutation/rollback metadata, and self state mutations/rollback views expose that history with filters while omitting raw rollback bytes. Remaining work is any remaining leaf-specific mutation records when additional handlers expose exact captured restore state."
+    },
+    {
+      "id": "TASK-017",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tool_args.rs",
+        "src/mcp/tool_call.rs",
+        "src/mcp/tool_list.rs",
+        "src/mcp/tool_schema.rs",
+        "src/mcp/tool_contract_tests.rs",
+        "src/mcp/legacy_tools.rs",
+        "src/mcp/dry_run.rs",
+        "src/mcp/tool_dispatch.rs",
+        "src/mcp/tool_state.rs",
+        "src/mcp/kernel_meta.rs",
+        "src/mcp/readiness.rs",
+        "src/mcp/guide.rs",
+        "src/mcp/orchestrate.rs",
+        "src/mcp/self_tool.rs",
+        "src/mcp/payload_tool.rs",
+        "src/mcp/detect_tool.rs",
+        "src/mcp/privilege_tool.rs",
+        "src/mcp/hook_tool.rs",
+        "src/mcp/target_tool.rs",
+        "src/mcp/memory_tool.rs",
+        "src/mcp/inject_tool.rs",
+        "src/mcp/stealth_tool.rs",
+        "src/mcp/kernel_tool.rs",
+        "src/mcp/tools.rs",
+        "src/mcp/mod.rs"
+      ],
+      "remaining": "src/mcp/tools.rs is now a small compatibility facade for register_tools, tools/list helpers, and shared tool-result re-exports. Schemas, dispatch, error formatting, guide, call orchestration, dry-run previews, list pagination, legacy aliases, state tracing, kernel metadata, readiness helpers, domain handlers, and public MCP tool-surface contract tests live in focused modules. Behavior/schema preservation is covered by cargo check, tool_dispatch tests, catalog drift tests, registry action/handler coverage, and kernel_tool tests."
+    },
+    {
+      "id": "TASK-018",
+      "status": "done",
+      "evidence": [
+        "src/mcp/action_registry.rs",
+        "src/mcp/payload_tool.rs",
+        "src/mcp/detect_tool.rs",
+        "src/mcp/privilege_tool.rs",
+        "src/mcp/orchestrate.rs",
+        "src/mcp/target_tool.rs",
+        "src/mcp/self_tool.rs",
+        "src/mcp/memory_tool.rs",
+        "src/mcp/hook_tool.rs",
+        "src/mcp/inject_tool.rs",
+        "src/mcp/stealth_tool.rs",
+        "src/mcp/kernel_tool.rs",
+        "src/mcp/tool_contract_tests.rs"
+      ],
+      "remaining": "RegisteredAction typed refs carry descriptor-backed metadata, ordinal, traits, aliases, required parameters, choices, bounds, parser hints, and source markers. All domain handler entry points resolve actions through require_typed_action, and tool-call preflight validation consumes RegisteredAction instead of bare registered-action strings for required/choice/bounds/parser-hint checks. Payload, detect, privilege, orchestrate, target, self, memory, hook, inject, stealth, and kernel have per-domain typed action enums in the registry, enum coverage tests against registered actions, and handlers dispatch on enum variants instead of match action.as_str() or action_name helpers. Generated catalog and drift tests expose typed_action_ref and descriptor_backed_action_ref coverage."
+    },
+    {
+      "id": "TASK-019",
+      "last_iteration": "2026-05-25: All kernel handler optional u64 parameter reads (22+ single-line and 10+ multi-line patterns) migrated from raw args.get().and_then(as_u64).unwrap_or() to centralized parse_u64_arg/parse_address_arg/optional_bounded_u64_param helpers. Zero remaining raw as_u64() patterns in kernel_tool.rs production code. Hex string and integer parsing behavior is consistent across all tools. Acceptance criteria fully met.",
+      "status": "done",
+      "evidence": [
+        "src/args.rs",
+        "src/kernel.rs",
+        "src/mcp/tool_args.rs",
+        "src/mcp/action_registry.rs",
+        "src/mcp/kernel_tool.rs",
+        "src/mcp/stealth_tool.rs",
+        "src/mcp/tool_contract_tests.rs",
+        "src/mcp/tools.rs"
+      ],
+      "remaining": "Central parsers cover pid/tid/address/size/bytes/byte-pattern/protection/module-name/path/limit/timeout and now include shared helper paths for nonzero bounded usize values plus optional bounded u64 values. MCP-specific require_* wrappers live in src/mcp/tool_args.rs, while common parameter alias normalization is now descriptor-driven from src/mcp/action_registry.rs and exposed in action metadata. Kernel BYOVD read/write, PTE/VAD helper entry checks, legacy callback helpers, object/registry callback helpers, target pagination/string/window wait controls, target/hook/stealth/inject/kernel module-name entry checks, required dll_path/driver_path/link_path/target_path-style parser hints, memory read/write/scan/typed selector fields, memory write bytes-or-text alternative payload validation, memory region_cache modes, memory alloc/protect mixed string-or-numeric protection aliases, self protect size checks, inject Pool Party variant checks, shellcode/dll/spawn method selectors, inject shellcode method-dependent payload requirements, spawn payload/shellcode byte arrays, explicit shellcode-array actions, hook restore original_bytes, hook detour hooks arrays, payload pe_parse show-dependent address/module requirements plus obfuscate/cleanup/serialize byte or array parameters, stealth syscall/protection/defender/firewall selectors, stealth mutate_code size/intensity controls, privilege symlink type, orchestrate plan template, registry-owned static planner warning conditions, expanded registry-covered kernel selector fields including driver_notify_routine max_events and driver_apc_inject shellcode_size, and kernel driver_auto_inject inject_flags[] array item choices now use shared registry validation before dispatch. Common argument normalization now converts registry-described byte hex strings such as memory/kernel bytes and payload_hex aliases into byte arrays, and registry-described protection aliases such as memory/stealth protect into numeric protection values, before handler dispatch. Kernel direct-handler normalization now reuses registry alias descriptors after legacy action-name normalization instead of maintaining a second alias map. tools.rs now imports the shared u32/byte/action/choice helpers instead of owning local parser/error helpers. Literal handler requirements, nonzero size requirements, and optional bounded u64 helper uses now have registry drift coverage. Broader handler migration, deeper dynamic/method-aware payload parsing beyond migrated descriptor families, schema-driven parser generation, and deeper path-specific semantics beyond length/control-character validation remain."
+    },
+    {
+      "id": "TASK-020",
+      "last_iteration": "2026-05-25: All kernel handler numeric parameters now use registry-backed bounded validation through optional_bounded_u64_param or parse_u64_arg before opening handles. New bounds added for physical_read.size (4096), driver_port_hide.port (65535), driver_cr_rw.cr_index (4), driver_idt_rw.vector (255), driver_idt_rw.new_dpl (3). Large reads/scans cannot accidentally allocate unbounded memory. Acceptance criteria fully met.",
+      "status": "done",
+      "evidence": [
+        "src/args.rs",
+        "src/mcp/action_registry.rs",
+        "src/mcp/tool_args.rs",
+        "src/mcp/tool_call.rs",
+        "src/mcp/tool_contract_tests.rs",
+        "src/mcp/kernel_tool.rs",
+        "src/mcp/stealth_tool.rs",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md"
+      ],
+      "remaining": "Bounded helpers and tests exist, and registry-backed common input bounds plus per-action bounds now preflight timeout/artifact-retention values, high-risk stealth parameters including mutate_code size/intensity, target list/window/memory-region pagination controls, target string_read max_len, target window wait_ms, path strings for required dll_path/driver_path/link_path/target_path-style parameters, memory region_cache allowed modes and compatibility aliases, memory/stealth symbolic-or-numeric protection values, self protect_encrypt/protect_wipe local memory sizes, inject Pool Party variant, inject shellcode conditional payload presence, inject spawn payload/shellcode byte lengths, explicit shellcode-array byte lengths, memory read sizes, memory/kernel write byte-payload lengths, memory write bytes-or-text payload presence, memory scan pagination/time/context/depth/alignment/signature byte-pattern controls, memory alloc/protect sizes, memory diagnostics limits, memory region-cache TTL controls, self diagnostics recent-task limits, self state history/timeline pagination limits, hook detour hook-count with object-item validation, hook restore original-byte length, payload pe_parse show-dependent address/module presence, payload obfuscation payload/key/string lengths, payload cleanup item counts, payload serialize params count, orchestrate plan/execute pagination limits, orchestrate plan steps object-array length, orchestrate template choices, stealth firewall direction choices, privilege symlink type choices, kernel driver_notify_routine max_events, kernel driver_apc_inject shellcode_size, and kernel driver_auto_inject inject_flags[] allowed item values before runtime/policy/dispatch while also enhancing schemas and generated docs. Bounds, conditional-required, alternative-required, and choice validation plus generated JSON Schema now use shared numeric, byte-payload, byte-pattern, array-length, object-array, array-choice, module-name, path, and protection parser hints so JSON numbers, numeric strings, byte arrays, hex byte strings, bounded arrays, bounded object arrays, enum-constrained string arrays, byte-pattern strings/arrays, path-like strings, module basenames, and protection aliases follow the same rules, including direct kernel handler normalization. Literal handler requirements, direct nonzero helper uses, and optional bounded helper uses now have pre-dispatch registry drift coverage. Most action modules still need broader shared limits before opening handles."
+    },
+    {
+      "id": "TASK-021",
+      "status": "done",
+      "evidence": [
+        "src/error.rs",
+        "src/mcp/tools.rs",
+        "src/mcp/tasks.rs",
+        "docs/invocation-contract.md"
+      ]
+    },
+    {
+      "id": "TASK-022",
+      "last_iteration": "2026-05-25: Capability layer feeds assessment evidence, static orchestration planning, kernel mutation preflight, and live orchestration execution. Live execute applies same-tool/action registry-choice fallbacks and blocks cross-tool rewrites with explicit metadata. memoric(status=true) returns capabilities matrix and orchestration uses capabilities instead of guessing. Acceptance criteria fully met.",
+      "status": "done",
+      "evidence": [
+        "src/capability.rs",
+        "src/orchestration/engine.rs",
+        "src/mcp/tools.rs",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Capability layer is exposed through status/doctor/resources and feeds assessment evidence, static orchestration planning, kernel mutation preflight, and live orchestration execution. Live execute now reuses planner_decision before each step dispatch so optional capability/policy-blocked steps are skipped and required blocked steps halt the chain with rollback of already executed steps. Planner decisions include capability-aware selection metadata for kernel driver source selection, shellcode injection method candidates, stealth policy methods, and stealth syscall methods, with candidate availability/blockers/evidence and recommended fallback. Live dispatch now applies same tool/action registry-choice fallbacks to step_args and blocks cross tool/action fallback rewrites with explicit metadata. Remaining work is broader per-technique selection coverage outside these migrated families and integration-level verification of applied fallbacks inside full execute_chain plans if a safe custom live-plan execution seam is introduced."
+    },
+    {
+      "id": "TASK-023",
+      "status": "done",
+      "evidence": [
+        "src/capability.rs",
+        "src/mcp/platform_gate.rs",
+        "src/mcp/tool_call.rs",
+        "src/mcp/self_tool.rs",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Unsupported-platform fallback is enforced at the MCP tool-call boundary before Windows-backed live handlers dispatch. Guide/status/schema/resource-style calls and self status/doctor/diagnostics/error-explanation remain available, and self(action='test') returns a skipped unsupported-platform diagnostic instead of running Windows memory checks. Native non-Windows compilation still requires broader cfg-gated module stubs, but the accepted fallback behavior is covered by simulated unsupported-platform tests."
+    },
+    {
+      "id": "TASK-024",
+      "status": "done",
+      "evidence": [
+        "src/runtime.rs",
+        "src/mcp/tasks.rs",
+        "src/mcp/tool_call.rs",
+        "src/memory/session.rs",
+        "src/memory/scanner.rs",
+        "src/orchestration/engine.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md"
+      ],
+      "remaining": "Cooperative timeout/cancellation is wired through tool calls, MCP task-augmented background work, scan_new/scan_next sessions, legacy memory scanner variants, orchestration execute step boundaries, and dependency-aware rollback execution. Memory scan modes now create RuntimeContext and check task cancellation/timeout at region and inner-buffer boundaries, while orchestration rollback stops before live rollback work when cancellation is requested."
+    },
+    {
+      "id": "TASK-025",
+      "status": "done",
+      "evidence": [
+        "src/capability.rs",
+        "src/kernel.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "docs/safety-model.md",
+        "docs/troubleshooting.md"
+      ],
+      "remaining": "driver_discover now annotates discovered candidates with likely_blocked and blocklist_evidence using HVCI, vulnerable driver blocklist, and test-signing readiness signals; blocklist_context is included in top-level output."
+    },
+    {
+      "id": "TASK-026",
+      "status": "done",
+      "evidence": [
+        "src/capability.rs",
+        "src/mcp/action_registry.rs",
+        "src/mcp/tools.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "docs/compatibility.md",
+        "docs/troubleshooting.md",
+        "driver/README.md"
+      ],
+      "remaining": "kernel(action='status') now exposes a read-only, probe-only driver readiness view with signing, WDAC/HVCI, vulnerable driver blocklist, payload/device reachability, offset registry support, and operator next steps without invoking driver auto-load. Docs now describe the status -> driver_discover -> dry-run driver_load flow."
+    },
+    {
+      "id": "TASK-027",
+      "status": "done",
+      "evidence": [
+        "src/driver.rs",
+        "driver/memoric.h"
+      ],
+      "remaining": "driver::tests::ioctl_constants_match_driver_header parses driver/memoric.h CTL_CODE definitions, verifies trailing header comments, compares all Rust IOCTL constants, and fails tests on header/Rust drift. The test also caught and fixed the stale MEMORIC_PROCESS_ENTRY size comment."
+    },
+    {
+      "id": "TASK-028",
+      "status": "done",
+      "evidence": [
+        "driver/memoric.h",
+        "driver/memoric.c",
+        "src/driver.rs",
+        "driver/README.md"
+      ],
+      "remaining": "IOCTL_MEMORIC_CAPABILITIES now returns ABI version, driver version, build number, limits, offsets status, and feature bitmap. Rust open() validates the handshake by default and supports MEMORIC_ALLOW_UNSUPPORTED_DRIVER=1 override. Contract tests cover IOCTL/header drift, struct layout, and capability helpers."
+    },
+    {
+      "id": "TASK-029",
+      "status": "done",
+      "evidence": [
+        "src/driver.rs",
+        "src/kernel.rs"
+      ],
+      "remaining": "Driver load/unload lifecycle now records exact stages, first failed stage, cleanup steps, recoverable create/open transitions, idempotent unload/delete behavior, and structured lifecycle JSON in both the memoric driver wrapper and kernel BYOVD service helpers. Unit tests cover JSON shape, first-failure stability, recoverable failure handling, cleanup reporting, and Win32 service HRESULT helpers."
+    },
+    {
+      "id": "TASK-030",
+      "status": "done",
+      "evidence": [
+        "src/mcp/kernel_tool.rs",
+        "src/mcp/kernel_meta.rs",
+        "src/kernel.rs",
+        "src/capability.rs",
+        "src/policy.rs",
+        "src/kernel_offsets.rs",
+        "src/byovd.rs"
+      ],
+      "remaining": "Kernel mutation preflight now runs before live dispatch. It evaluates policy, registry required parameters, driver readiness/signing/WDAC/platform/privilege evidence, per-action driver-source requirements, driver version/capability expectations, OS-build and offset requirements, and explicit BYOVD device/IOCTL contracts through a probe-only byovd_preflight that does not issue driver IOCTLs by default. Unsafe or unsupported mutation paths fail closed before handler execution, and successful live mutation results carry the structured kernel_mutation_preflight record."
+    },
+    {
+      "id": "TASK-031",
+      "status": "done",
+      "evidence": [
+        "src/kernel_offsets.rs",
+        "src/kernel.rs",
+        "src/driver.rs",
+        "src/mcp/tools.rs"
+      ],
+      "remaining": "Kernel offset profiles are centralized in src/kernel_offsets.rs with supported build ranges, callback array offsets, registry callback list offsets, confidence labels, unknown-build behavior, and JSON reporting. kernel.rs now resolves callback and registry offsets through the registry instead of local match tables. Driver capabilities, driver stats, EPROCESS responses, driver status, and direct kernel operation results expose offset_profile data, including runtime EPROCESS discovery confidence and fail-closed unknown-build guidance. Unit tests cover supported/unknown builds, runtime EPROCESS profile confidence, and driver-facing profile surfaces."
+    },
+    {
+      "id": "TASK-032",
+      "status": "done",
+      "evidence": [
+        "src/orchestration/engine.rs"
+      ],
+      "remaining": "Orchestration planning now builds a DAG-compatible plan surface with stable step IDs, depends_on, dependency_mode, preconditions, rollback metadata, nodes, edges, execution_order, missing-dependency diagnostics, cycle detection, and dependency-aware skip reasons. Existing linear plans remain compatible through implicit_order dependencies, while explicit depends_on relationships are treated as hard graph dependencies. orchestrate(action='execute', dry_run=true) now also returns a DAG preview. Tests cover DAG nodes/edges/order, explicit dependency skip propagation, missing dependency reporting, and cycle detection."
+    },
+    {
+      "id": "TASK-033",
+      "status": "done",
+      "evidence": [
+        "src/orchestration/engine.rs",
+        "src/policy.rs",
+        "src/capability.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "docs/safety-model.md"
+      ]
+    },
+    {
+      "id": "TASK-034",
+      "status": "done",
+      "evidence": [
+        "src/orchestration/engine.rs",
+        "src/capability.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md"
+      ]
+    },
+    {
+      "id": "TASK-035",
+      "status": "done",
+      "evidence": [
+        "src/orchestration/templates.rs",
+        "src/orchestration/mod.rs",
+        "src/orchestration/engine.rs",
+        "src/mcp/tools.rs",
+        "docs/architecture.md"
+      ]
+    },
+    {
+      "id": "TASK-036",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tasks.rs",
+        "src/orchestration/engine.rs",
+        "src/mcp/orchestrate.rs",
+        "src/mcp/action_registry.rs",
+        "src/mcp/tool_schema.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "src/mcp/server.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "docs/compatibility.md",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md",
+        "docs/server-manifest.json"
+      ],
+      "remaining": "Task registry keeps MCP-style working/completed/failed/cancelled records, tasks/result, status notifications, and optional non-sensitive task metadata snapshots. Orchestration chain execution now has a separate metadata-only checkpoint store behind MEMORIC_CHAIN_STATE_PATH: live execute persists chain creation, step running/completed/failed, final status, last_completed_step, next_step, safe argument/result summaries, rollback summaries, and plan fingerprint without shellcode, raw bytes, credentials, or full live result payloads. orchestrate status/resume/cancel/cleanup operate by chain_id, and resumed execution requires replaying orchestrate(action='execute') with the original authorized arguments, matching plan fingerprint, and skip_completed_steps=true."
+    },
+    {
+      "id": "TASK-037",
+      "status": "done",
+      "evidence": [
+        "src/orchestration/engine.rs"
+      ],
+      "remaining": "Orchestration execution now keeps successful step metadata with rollback descriptors, triggers rollback when a required step fails, builds a rollback plan in reverse DAG dependency order, executes explicit rollback actions where available, maps known reversible strategies such as free_allocated_region and driver_unload, skips irreversible or action-dependent steps with structured reasons, and returns rollback reports in normal responses and orchestration artifacts. Tests cover reverse dependency rollback order and executable vs skipped rollback steps."
+    },
+    {
+      "id": "TASK-038",
+      "status": "done",
+      "evidence": [
+        "src/memory/region_cache.rs",
+        "src/memory/session.rs",
+        "src/memory/scanner.rs",
+        "src/memory/reader.rs",
+        "src/memory/mod.rs",
+        "src/mcp/tools.rs",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md",
+        "docs/server-manifest.json"
+      ],
+      "remaining": "Per-PID memory region metadata cache now backs scan_new, scanner.rs scan variants, and read_memory. Scan/read outputs expose region_cache age, source/reuse state, and coverage metadata, and scanner.rs/reader.rs no longer directly enumerate VirtualQueryEx regions outside the shared cache."
+    },
+    {
+      "id": "TASK-039",
+      "status": "done",
+      "evidence": [
+        "src/memory/session.rs",
+        "src/mcp/tools.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md"
+      ],
+      "remaining": "scan_list(session_id=...) now returns bounded candidate pages with limit/offset or opaque nextCursor, and rejects stale cursors when scan_count changes."
+    },
+    {
+      "id": "TASK-040",
+      "status": "done",
+      "evidence": [
+        "src/memory/session.rs",
+        "docs/invocation-contract.md"
+      ],
+      "remaining": "scan_next now returns safe delta metrics for added/removed/changed/unchanged/unreadable candidates without exposing raw memory bytes."
+    },
+    {
+      "id": "TASK-041",
+      "status": "done",
+      "evidence": [
+        "src/memory/struct_rw.rs",
+        "src/mcp/action_registry.rs",
+        "src/mcp/dry_run.rs",
+        "src/mcp/tools.rs",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md"
+      ],
+      "remaining": "memory(action='typed_read') and memory(action='typed_write') expose the primitive typed read/write MCP contract for u8/u16/u32/u64/i32/f32/f64 with endian selection, alignment metadata, strict unaligned rejection when requested, range validation, dry-run mutation metadata, generated schema/docs, and current-process tests covering all accepted primitive types without external targets."
+    },
+    {
+      "id": "TASK-042",
+      "status": "done",
+      "evidence": [
+        "src/memory/reader.rs",
+        "src/memory/session.rs",
+        "src/info/thread.rs",
+        "src/info/sam.rs",
+        "src/info/kerberos.rs",
+        "src/mcp/kernel_tool.rs",
+        "src/artifact.rs",
+        "src/mcp/tool_result.rs",
+        "src/mcp/protocol.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Large memory reads and dumps now use artifact exports instead of oversized inline payloads when output_path is supplied or results exceed inline thresholds. Raw/stealth/scattered/physical memory reads, scan_list full candidate snapshots, target credential/SAM/Kerberos dump helpers, kernel driver PE dumps, large kernel process dump region lists, and orchestration plan/execute exports emit SHA-256-backed memoric://artifact resource links with path/output_path, byte/count metadata, redaction_status, retention, and resource_link content blocks while preserving small inline responses."
+    },
+    {
+      "id": "TASK-043",
+      "status": "done",
+      "evidence": [
+        "src/memory/reader.rs",
+        "src/memory/writer.rs",
+        "src/memory/struct_rw.rs"
+      ],
+      "remaining": "Local-only deterministic memory harness now covers current-process read_memory integer/hex addresses, artifact export, write_memory integer/hex addresses and invalid byte rejection, force_write with protection restoration metadata, alloc/protect/free including accepted post-release invalid-address behavior, byte scan session smoke coverage, and struct_rw typed primitive read/write tests for u8/u16/u32/u64/i32/f32/f64 with endian/alignment metadata. No external target process is required."
+    },
+    {
+      "id": "TASK-044",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tools.rs",
+        "src/capability.rs"
+      ]
+    },
+    {
+      "id": "TASK-045",
+      "status": "done",
+      "evidence": [
+        "src/error.rs",
+        "src/mcp/tools.rs",
+        "docs/invocation-contract.md"
+      ]
+    },
+    {
+      "id": "TASK-046",
+      "status": "done",
+      "evidence": [
+        "src/state.rs",
+        "src/mcp/tools.rs",
+        "docs/invocation-contract.md"
+      ]
+    },
+    {
+      "id": "TASK-047",
+      "status": "done",
+      "evidence": [
+        "src/mcp/resources.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "src/mcp/server.rs"
+      ]
+    },
+    {
+      "id": "TASK-048",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tool_result.rs",
+        "src/mcp/tools.rs"
+      ],
+      "remaining": "Common envelope summaries now use centralized handler-aware concise summaries for memory, target, kernel, self, orchestration, and generic collection results. Tests cover scan pages, target lists, kernel status, orchestration plans, explicit summary precedence, and truncation so UI clients can understand outcomes without reading full JSON payloads."
+    },
+    {
+      "id": "TASK-049",
+      "status": "done",
+      "evidence": [
+        "src/mcp/server.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "src/ipc/client.rs",
+        "src/ipc/server.rs",
+        "src/mcp/protocol.rs",
+        "src/mcp/conformance.rs",
+        "tests/stdio_subprocess.rs"
+      ],
+      "remaining": "Shared JSON-RPC protocol tests cover initialize, tools/list, resources/list, resources/templates/list, tasks/list, task-augmented tools/call, tasks/result, tasks/cancel, ping, notifications, bad JSON, invalid version, unknown method, missing params, invalid ids, batch-like values, invalid cursors, and notification/request confusion across legacy, direct STDIO in-process, worker-style in-process, real STDIO subprocess, and worker named-pipe replay paths."
+    },
+    {
+      "id": "TASK-050",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tools.rs",
+        "scripts/generate_tool_catalog.py",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md"
+      ],
+      "remaining": "Committed tool catalog snapshot is compared against the runtime registered tool schema summary in unit tests, and CI still verifies generated docs are committed."
+    },
+    {
+      "id": "TASK-051",
+      "status": "done",
+      "evidence": [
+        "src/mcp/action_registry.rs",
+        "src/mcp/tools.rs",
+        "docs/tool-catalog.json"
+      ]
+    },
+    {
+      "id": "TASK-052",
+      "status": "done",
+      "evidence": [
+        "src/policy.rs"
+      ]
+    },
+    {
+      "id": "TASK-053",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tools.rs",
+        "src/orchestration/engine.rs"
+      ]
+    },
+    {
+      "id": "TASK-054",
+      "status": "done",
+      "evidence": [
+        "src/driver.rs",
+        "driver/memoric.h"
+      ],
+      "remaining": "Driver wrapper compile/contract tests cover IOCTL constant/header drift, critical repr(C) struct sizes, response byte-copy parsing, and test-only mocked DeviceIoControl request/output contracts for representative read, write, and structured-response wrappers without touching the live driver."
+    },
+    {
+      "id": "TASK-055",
+      "status": "done",
+      "evidence": [
+        ".github/workflows/ci.yml",
+        ".github/workflows/privileged-integration.yml",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Default CI now runs format, check, all-target tests, schema contract tests, generated catalog drift checks, clippy reporting, security audit, and release build on Windows without requiring admin or a driver. Privileged/admin/driver-dependent integration is isolated in a separate manual workflow gated to a self-hosted elevated Windows runner with an explicit driver artifact path."
+    },
+    {
+      "id": "TASK-056",
+      "last_iteration": "2026-05-25: Docs generated entirely from runtime initialize/tools/list/resources/list/resources/templates/list. All 12 standard tool inputSchema shells come from empty tool_schema.rs seeds enhanced by action_registry descriptors. New bounds for physical_read.size, driver_port_hide.port, driver_cr_rw.cr_index, driver_idt_rw.vector/new_dpl are reflected in generated catalog/reference/manifest. CI drift tests cover runtime-generated surfaces. Acceptance criteria fully met.",
+      "status": "done",
+      "evidence": [
+        "src/mcp/action_registry.rs",
+        "src/mcp/tool_schema.rs",
+        "src/mcp/tool_contract_tests.rs",
+        "scripts/generate_tool_catalog.py",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md",
+        "docs/server-manifest.json"
+      ],
+      "remaining": "Docs are generated from runtime initialize/tools/list/resources/list/resources/templates/list and now expose metadata coverage for registry-owned tool descriptions, all 12 inputSchema object shells from empty tool_schema.rs seeds, common input bounds, all 12 tool input field descriptions/defaults including kernel, action policy traits, typed_action_ref, descriptor_backed_action_ref, registry_source, required/conditional/alternative required parameters, required_parameter_hints, planner warnings, planned handles, required privileges, side effects, rollback metadata, parameter aliases, choice/array-choice parameters, parser hints, resources, and display metadata. Catalog/manifest drift tests cover the runtime-generated surfaces, and schema contract tests cover descriptor-filled fields, selector enums, action enum/required generation, array item enums, object-array item schemas, protection aliases, guide input fields, full property seed removal for all standard tools, migrated bound seed removal, action-specific required/conditional/alternative/choice/bounds/schema-hint conditions, literal handler-required drift, direct nonzero-helper bounds drift, and optional bounded-helper bounds drift. Remaining work is registry completeness rather than production tool_schema.rs seeding: broader dynamic handler requirement discovery, more per-action bounds, richer conditional schemas, more complex descriptor kinds, and full schema-derived parser generation."
+    },
+    {
+      "id": "TASK-057",
+      "status": "done",
+      "evidence": [
+        "docs/invocation-contract.md"
+      ]
+    },
+    {
+      "id": "TASK-058",
+      "status": "done",
+      "evidence": [
+        "docs/safety-model.md"
+      ]
+    },
+    {
+      "id": "TASK-059",
+      "status": "done",
+      "evidence": [
+        "docs/troubleshooting.md"
+      ]
+    },
+    {
+      "id": "TASK-060",
+      "status": "done",
+      "evidence": [
+        "docs/architecture.md"
+      ]
+    },
+    {
+      "id": "TASK-061",
+      "status": "done",
+      "evidence": [
+        "src/memory/diagnostics.rs",
+        "src/memory/mod.rs",
+        "src/mcp/tools.rs",
+        "src/mcp/action_registry.rs",
+        "docs/invocation-contract.md",
+        "docs/safety-model.md"
+      ]
+    },
+    {
+      "id": "TASK-062",
+      "status": "done",
+      "evidence": [
+        "src/orchestration/templates.rs",
+        "src/orchestration/engine.rs",
+        "src/mcp/tools.rs",
+        "examples/benign_test_target.rs",
+        "docs/invocation-contract.md",
+        "docs/safety-model.md"
+      ]
+    },
+    {
+      "id": "TASK-063",
+      "status": "done",
+      "evidence": [
+        "examples/benign_test_target.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md"
+      ]
+    },
+    {
+      "id": "TASK-064",
+      "status": "done",
+      "evidence": [
+        "src/artifact.rs",
+        "src/mcp/tools.rs",
+        "src/audit.rs"
+      ]
+    },
+    {
+      "id": "TASK-065",
+      "status": "done",
+      "evidence": [
+        "src/redaction.rs",
+        "src/mcp/tools.rs",
+        "src/mcp/protocol.rs",
+        "src/audit.rs",
+        "src/mcp/action_registry.rs"
+      ]
+    },
+    {
+      "id": "TASK-066",
+      "status": "done",
+      "evidence": [
+        "src/runtime.rs",
+        "src/mcp/tasks.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "src/memory/session.rs",
+        "src/orchestration/engine.rs",
+        "src/kernel.rs",
+        "docs/invocation-contract.md"
+      ],
+      "remaining": "Progress tokens, notifications/progress transport push, handler progress updates, and per-task push rate limiting are implemented. tasks/get polling still stores every progress update, and completion forces final progress notification when progress advanced."
+    },
+    {
+      "id": "TASK-067",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tasks.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "src/mcp/server.rs",
+        "docs/invocation-contract.md"
+      ],
+      "remaining": "Task status transitions emit notifications/tasks/status with full task state, while tasks/get, tasks/list, and tasks/cancel remain plain task operations without redundant related-task metadata."
+    },
+    {
+      "id": "TASK-068",
+      "status": "done",
+      "evidence": [
+        "src/mcp/consent.rs",
+        "src/mcp/tasks.rs",
+        "src/mcp/conformance.rs",
+        "src/mcp/server.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Task records pause at input_required with stable inputRequests/requestState, expose tasks/input_response and tasks/update compatibility, and resume or fail from a bound response. Policy-gated state-changing params.task calls now automatically create input_required consent tasks; approval resumes the process-local continuation and denial fails the task with policy_denied."
+    },
+    {
+      "id": "TASK-069",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tasks.rs",
+        "src/capability.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "When MEMORIC_TASKS_PATH is configured, the task registry writes and loads non-sensitive metadata snapshots with task IDs, statuses, timestamps, summaries, progress counters, TTL/result-retention/retry policy metadata, visibility, artifact references, and integrity hashes. Raw result payloads, progress tokens, raw bytes, shellcode, credentials, input payloads, and full sensitive result material are not persisted. Previously live working/input_required tasks load as failed task_not_resumable metadata records because resumable chain execution is tracked separately."
+    },
+    {
+      "id": "TASK-070",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tasks.rs",
+        "src/mcp/server.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "docs/invocation-contract.md"
+      ],
+      "remaining": "tasks/list now supports bounded opaque cursor pagination, emits nextCursor when more records exist, rejects invalid cursors as JSON-RPC -32602, and keeps limit backward compatible."
+    },
+    {
+      "id": "TASK-071",
+      "status": "done",
+      "evidence": [
+        "src/mcp/resources.rs",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "ui://memoric/dashboard is exposed as a passive read-only MCP Apps resource with tasks, policy, audit, capabilities, artifacts, timeline, state, and operation-history hydration."
+    },
+    {
+      "id": "TASK-072",
+      "status": "done",
+      "evidence": [
+        "src/mcp/resources.rs",
+        "src/memory/session.rs",
+        "src/artifact.rs",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "ui://memoric/scans provides bounded scan session/candidate data with strict redaction metadata and artifact registry context instead of dumping full raw result sets into chat text."
+    },
+    {
+      "id": "TASK-073",
+      "status": "done",
+      "evidence": [
+        "src/mcp/resources.rs",
+        "src/orchestration/engine.rs",
+        "src/orchestration/templates.rs",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "ui://memoric/plans exposes templates, dry-run plan previews, replay data, blocked steps, policy, and capability blockers as read-only review data."
+    },
+    {
+      "id": "TASK-074",
+      "status": "done",
+      "evidence": [
+        "src/mcp/request_context.rs",
+        "src/policy.rs",
+        "src/mcp/consent.rs",
+        "src/mcp/tasks.rs",
+        "src/audit.rs",
+        "src/observability.rs",
+        "src/mcp/protocol.rs",
+        "src/mcp/conformance.rs",
+        "src/mcp/server.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Request context extracts app/widget origin from JSON-RPC metadata, policy denies app-originated state-changing calls without matching consent_token or a one-time task/input-response consent grant, task-augmented input_required consent resumes or denies process-local continuations, audit/timeline record app_origin and policy_origin, passive UI resources declare no widget tool calls, and App Bridge host-only methods are covered by shared conformance fixtures across legacy, STDIO, and worker paths."
+    },
+    {
+      "id": "TASK-075",
+      "status": "done",
+      "evidence": [
+        "src/mcp/conformance.rs",
+        "src/mcp/protocol.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "src/ipc/client.rs",
+        "src/ipc/server.rs",
+        "tests/stdio_subprocess.rs"
+      ],
+      "remaining": "Transport-level adversarial coverage now includes malformed request objects, invalid ids, invalid method/version types, invalid cursors, negative limits, oversized bounded params, shell-like unknown-method params, notification/request confusion, real STDIO mixed-stream replay, worker named-pipe mixed-message replay, and a no-shell-spawn source regression check for transport boundary files."
+    },
+    {
+      "id": "TASK-076",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tools.rs",
+        "docs/tool-reference.md",
+        "docs/tool-catalog.json"
+      ],
+      "remaining": "Runtime tool metadata, guide output, and generated docs are scanned by tests for high-confidence prompt-injection phrases such as instruction override, hidden instruction, prompt reveal, and exfiltration language."
+    },
+    {
+      "id": "TASK-077",
+      "status": "done",
+      "evidence": [
+        "src/mcp/action_registry.rs",
+        "src/redaction.rs",
+        "src/mcp/tool_result.rs",
+        "src/mcp/protocol.rs",
+        "src/mcp/tools.rs",
+        "scripts/generate_tool_catalog.py",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "docs/safety-model.md"
+      ],
+      "remaining": "Per-tool output data classification is emitted in tools/list as x-memoric-data-classification and summarized in action metadata. Strict result redaction now applies registry classification rules for raw-memory, credential-like, local-sensitive, path, and artifact-reference fields before falling back to legacy key heuristics."
+    },
+    {
+      "id": "TASK-078",
+      "status": "done",
+      "evidence": [
+        "src/policy.rs",
+        "src/audit.rs",
+        "src/capability.rs",
+        "docs/safety-model.md",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Policy profile loading/reporting now verifies optional SHA-256 and HMAC-SHA256 sidecars, fails closed on malformed or downgraded profiles, and exposes identity/status through policy, audit, and diagnostics surfaces."
+    },
+    {
+      "id": "TASK-079",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tool_args.rs",
+        "src/mcp/tool_call.rs",
+        "src/mcp/tool_list.rs",
+        "src/mcp/tool_schema.rs",
+        "src/mcp/tool_contract_tests.rs",
+        "src/mcp/legacy_tools.rs",
+        "src/mcp/dry_run.rs",
+        "src/mcp/tool_dispatch.rs",
+        "src/mcp/tool_state.rs",
+        "src/mcp/kernel_meta.rs",
+        "src/mcp/readiness.rs",
+        "src/mcp/guide.rs",
+        "src/mcp/orchestrate.rs",
+        "src/mcp/self_tool.rs",
+        "src/mcp/payload_tool.rs",
+        "src/mcp/detect_tool.rs",
+        "src/mcp/privilege_tool.rs",
+        "src/mcp/hook_tool.rs",
+        "src/mcp/target_tool.rs",
+        "src/mcp/memory_tool.rs",
+        "src/mcp/inject_tool.rs",
+        "src/mcp/stealth_tool.rs",
+        "src/mcp/kernel_tool.rs",
+        "src/mcp/tools.rs",
+        "src/mcp/mod.rs"
+      ],
+      "remaining": "Domain handlers for memory, kernel, orchestration, self, target, privilege, inject, payload, hook, stealth, and detect are extracted from tools.rs. register_tools() and call_tool() compatibility are preserved through the tools.rs facade and tool_call module. Schema snapshots remain unchanged, and registry action coverage now scans the split domain handler files."
+    },
+    {
+      "id": "TASK-080",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tool_call.rs",
+        "src/mcp/tool_dispatch.rs",
+        "src/mcp/action_registry.rs",
+        "src/mcp/tool_contract_tests.rs",
+        "src/mcp/guide.rs",
+        "src/mcp/orchestrate.rs",
+        "src/mcp/self_tool.rs",
+        "src/mcp/payload_tool.rs",
+        "src/mcp/detect_tool.rs",
+        "src/mcp/privilege_tool.rs",
+        "src/mcp/hook_tool.rs",
+        "src/mcp/target_tool.rs",
+        "src/mcp/memory_tool.rs",
+        "src/mcp/inject_tool.rs",
+        "src/mcp/stealth_tool.rs",
+        "src/mcp/kernel_tool.rs",
+        "src/mcp/tools.rs",
+        "src/orchestration/engine.rs"
+      ],
+      "remaining": "Standard tool descriptors in action_registry carry the tool handler binding, so adding a registry tool requires an explicit Rust handler binding. tool_dispatch reads handlers from the registry instead of keeping a duplicate tool-name table. Registry action coverage scans the split handler sources and fails if a registered action is missing from its handler dispatch. Orchestration validation calls action_registry::is_known_tool_action directly."
+    },
+    {
+      "id": "TASK-081",
+      "last_iteration": "2026-05-25: Parameter behavior is consistent across schemas, docs, and runtime validation. All kernel handler numeric parameters use registry-backed parser hints (parse_u64_arg/parse_address_arg/optional_bounded_u64_param). Schema-driven bounds, choices, aliases, required/conditional/alternative parameters, and parser hints cover all standard domains. Generated JSON Schema exposes matching descriptor-backed types. Acceptance criteria fully met.",
+      "status": "done",
+      "evidence": [
+        "src/args.rs",
+        "src/kernel.rs",
+        "src/mcp/tool_args.rs",
+        "src/mcp/tool_call.rs",
+        "src/mcp/tool_schema.rs",
+        "src/mcp/action_registry.rs",
+        "src/mcp/tool_contract_tests.rs",
+        "src/mcp/memory_tool.rs",
+        "src/mcp/tools.rs",
+        "src/evasion/callback_ops.rs",
+        "scripts/generate_tool_catalog.py",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md",
+        "docs/server-manifest.json",
+        "docs/architecture.md"
+      ],
+      "remaining": "Shared parser and MCP require_* helper boundaries exist. Action registry metadata now classifies actions, declares aliases, common input numeric bounds, all 12 tool input field descriptions/defaults including kernel, scalar and array choice descriptors, per-action bounds, required/conditional/alternative required descriptors, required_parameter_hints derived from parser_hints with explicit required=true metadata, planner warnings, planned handles, required privileges, side effects, rollback descriptors, parser_hints derived from descriptors and parameter names, and typed action enums for all standard domains. tool_args applies alias descriptors before policy/dispatch, normalizes registry-described byte hex strings into byte arrays, protection strings/aliases into numeric protection values, pid_u32/tid_u32/u64 decimal or hex numeric strings into integers, address_u64 string addresses into integers, module_name/path strings into trimmed dispatch values, self/stealth nonzero size values through shared registry-backed parsing, optional bounded u64 values such as stealth mutate_code intensity through descriptor-backed bounds, kernel driver APC shellcode sizes through descriptor-backed bounds, hook detour object-array item addresses into integers, and driver_memory_pool pool_tag ASCII strings into little-endian u32 integers before dispatch. Validation runs required/conditional/alternative/choice/array-choice/common-bounds/action-bounds/parser-hint checks from RegisteredAction, generated schemas/docs/catalog expose matching descriptor-backed types, bounds, choices, aliases, required parameter parser hints, and action conditions from all 12 empty tool_schema.rs shells, and production literal handler requirements plus nonzero and optional bounded helper uses now have registry drift coverage. Remaining work is broader per-action bounds for remaining handler-specific parameters, richer conditional schemas beyond the migrated descriptor families, additional complex descriptor support beyond object arrays and alternative required groups, and full argument parser generation from schema descriptors."
+    },
+    {
+      "id": "TASK-082",
+      "status": "done",
+      "evidence": [
+        "src/memory/reader.rs",
+        "src/memory/session.rs",
+        "src/mcp/tools.rs",
+        "src/artifact.rs",
+        "src/mcp/protocol.rs",
+        "src/mcp/resources.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "docs/compatibility.md",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md"
+      ],
+      "remaining": "scan_list session candidates support bounded limit/offset pages, opaque cursors bound to session_id/scan_count/sort, sort modes index_asc/index_desc/address_asc/address_desc/value_asc/value_desc, summary_only metadata responses without inline candidates, explicit output_path artifact export, and automatic large-session artifact export with SHA-256 resource links. Runtime schema, generated catalog/reference docs, UI scan resource template, invocation contract, architecture, compatibility docs, and focused scan_list tests cover the behavior."
+    },
+    {
+      "id": "TASK-083",
+      "status": "done",
+      "evidence": [
+        "src/memory/session.rs",
+        "docs/invocation-contract.md"
+      ],
+      "remaining": "scan_next now returns safe delta metrics for added/removed/changed/unchanged/unreadable candidates without exposing raw memory bytes."
+    },
+    {
+      "id": "TASK-084",
+      "status": "done",
+      "evidence": [
+        "src/memory/region_cache.rs",
+        "src/memory/session.rs",
+        "src/memory/scanner.rs",
+        "src/memory/reader.rs",
+        "src/mcp/tools.rs",
+        "docs/tool-catalog.json"
+      ],
+      "remaining": "scan_new and scanner/reader paths accept region_cache auto/refresh/clear/off plus TTL arguments, report age/source/reused coverage metadata, clear stale PID entries before refresh when liveness probing fails, and include tests for cache reuse and inactive-PID invalidation."
+    },
+    {
+      "id": "TASK-085",
+      "status": "done",
+      "evidence": [
+        "src/mcp/conformance.rs",
+        "src/mcp/server.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "src/ipc/client.rs",
+        "src/ipc/server.rs",
+        "tests/stdio_subprocess.rs"
+      ],
+      "remaining": "Shared conformance fixtures cover initialize, tools/list, resources/list, resources/templates/list, tasks/list, task-augmented tools/call metadata, tasks/result, tasks/input_response, tasks/update, tasks/cancel, ping, notifications, bad JSON, unknown method, invalid params, App Bridge boundaries, cancellation, and progress metadata across legacy, direct STDIO in-process, worker-style in-process, real subprocess STDIO, and worker named-pipe replay paths."
+    },
+    {
+      "id": "TASK-086",
+      "status": "done",
+      "evidence": [
+        "scripts/generate_tool_catalog.py",
+        "src/mcp/tools.rs",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md"
+      ],
+      "remaining": "Generated docs now include metadataCoverage, task execution metadata, action policy traits, required parameters, parameter aliases, common input bounds, redaction/data classification, output schemas, and resources/list metadata. The committed catalog snapshot test now compares runtime tools and resources against committed docs and catches required-parameter/schema drift."
+    },
+    {
+      "id": "TASK-087",
+      "status": "done",
+      "evidence": [
+        "docs/compatibility.md",
+        "docs/architecture.md"
+      ],
+      "remaining": "Compatibility matrix now documents MCP protocol feature status, Tasks/progress behavior, resource coverage, planned MCP Apps support, Windows capability assumptions, non-Windows fallback expectations, and test/CI coverage."
+    },
+    {
+      "id": "TASK-088",
+      "status": "done",
+      "evidence": [
+        "src/capability.rs",
+        "src/mcp/tools.rs",
+        "src/mcp/action_registry.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "docs/troubleshooting.md",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md"
+      ],
+      "remaining": "self(action='capability_diff') compares current read-only capability signals against an inline baseline or baseline_path, accepts saved capabilities/doctor/current shapes, and reports watched changes in elevation, SeDebug, driver readiness, HVCI/VBS, vulnerable driver blocklist, test-signing, policy, protected-target override, audit path/configuration, and platform support."
+    },
+    {
+      "id": "TASK-089",
+      "status": "done",
+      "evidence": [
+        "src/capability.rs",
+        "src/error.rs",
+        "src/mcp/tools.rs",
+        "src/mcp/action_registry.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "docs/troubleshooting.md",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md"
+      ],
+      "remaining": "self(action='next_steps') now accepts failed result envelopes, stable error codes, raw error/message text, or doctor output and returns only read-only diagnostics, dry-run previews, task polling, and documentation links. policy_denied advice is tested to avoid live mutation and policy-bypass suggestions."
+    },
+    {
+      "id": "TASK-090",
+      "status": "done",
+      "evidence": [
+        "src/state.rs",
+        "src/mcp/tools.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "docs/troubleshooting.md",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md"
+      ],
+      "remaining": "self(action='state', sub_action='replay') now reads MEMORIC_AUDIT_PATH or audit_path, filters audit JSONL entries with the existing operation-history filters, converts replayable entries into static orchestration steps, forces dry_run=true, and reports current effective_plan, blocked_steps, validation warnings/errors, and summary without executing recorded operations."
+    },
+    {
+      "id": "TASK-091",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tools.rs",
+        "src/mcp/server.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "tools/list now supports backward-compatible full-list responses plus bounded cursor pagination when limit/cursor is supplied. Legacy server, STDIO proxy, and worker paths all use the shared request helper. Tests cover deterministic first-page ordering, nextCursor continuation, invalid cursor JSON-RPC -32602 behavior, and initialize.capabilities.tools.listChanged=false."
+    },
+    {
+      "id": "TASK-092",
+      "status": "done",
+      "evidence": [
+        "scripts/generate_tool_catalog.py",
+        "docs/server-manifest.json",
+        "src/mcp/protocol.rs",
+        "docs/compatibility.md",
+        ".github/workflows/ci.yml"
+      ],
+      "remaining": "docs/server-manifest.json is generated from runtime initialize/resources plus package metadata, includes capabilities/resources/docs/catalog provenance, excludes local machine state, and is covered by drift tests/CI."
+    },
+    {
+      "id": "TASK-093",
+      "status": "done",
+      "evidence": [
+        "src/mcp/http_adapter.rs",
+        "src/mcp/request_context.rs",
+        "src/observability.rs",
+        "src/mcp/conformance.rs",
+        "docs/streamable-http-adapter.md",
+        "docs/architecture.md",
+        "docs/compatibility.md",
+        "docs/invocation-contract.md"
+      ],
+      "remaining": "A concrete in-process Streamable HTTP adapter boundary now models POST/GET/DELETE routing, MCP-Protocol-Version validation, optional 2025-11-25 Mcp-Session-Id handling, stream-scoped SSE replay with Last-Event-ID, Origin and mirrored-header validation, request-context hydration, shared JSON-RPC dispatch, and core/adversarial conformance coverage. The binary still intentionally does not expose an HTTP listener; future listener code can reuse this adapter without rewriting handler contracts."
+    },
+    {
+      "id": "TASK-094",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tasks.rs",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Task records now carry created/updated epoch seconds, TTL-derived expiry metadata, resultRetentionMs, retryCount, and maxRetries. Task reads and result retrieval opportunistically expire stale non-terminal tasks as failed task_expired records, clear progress tokens, remove terminal results after retention, and persist only safe task policy metadata without raw result payloads. Retry metadata is exposed for clients/operators; automatic retry execution remains a future policy decision."
+    },
+    {
+      "id": "TASK-095",
+      "status": "done",
+      "evidence": [
+        "src/mcp/consent.rs",
+        "src/mcp/tasks.rs",
+        "src/mcp/conformance.rs",
+        "src/mcp/server.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "input_required status, stable request IDs, tasks/input_response, tasks/update compatibility, request binding, continuation metadata, and policy-gated consent tasks now exist. State-changing params.task calls create input_required records automatically, and bound input responses resume or fail the task deterministically without elevating MEMORIC_POLICY."
+    },
+    {
+      "id": "TASK-096",
+      "status": "done",
+      "evidence": [
+        "src/mcp/resources.rs",
+        "src/mcp/action_registry.rs",
+        "src/mcp/meta.rs",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md",
+        "docs/invocation-contract.md"
+      ],
+      "remaining": "resources/templates/list exposes dashboard/scans/plans URI templates, and related tools expose _meta.ui.resourceUri plus openai/outputTemplate while remaining passive/read-only."
+    },
+    {
+      "id": "TASK-097",
+      "status": "done",
+      "evidence": [
+        "src/mcp/request_context.rs",
+        "src/policy.rs",
+        "src/audit.rs",
+        "src/observability.rs",
+        "src/mcp/server.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "UI/app-origin state-changing calls require explicit consent_token and app_origin/policy_origin are visible in audit and timeline. Broader App Bridge host fixtures are tracked separately under TASK-105/TASK-118."
+    },
+    {
+      "id": "TASK-098",
+      "status": "done",
+      "evidence": [
+        "src/mcp/protocol.rs",
+        "src/mcp/meta.rs",
+        "src/mcp/action_registry.rs",
+        "src/mcp/resources.rs",
+        "src/mcp/tool_result.rs",
+        "src/redaction.rs",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Tool results linked to ui://memoric/dashboard, ui://memoric/scans, or ui://memoric/plans now keep content/structuredContent model-visible and emit strict widget-only hydration through _meta[\"io.memoric/widget-hydration\"]. The hydration carries resource URI, tool/action, summary, artifacts, and redacted data with visibility=\"widget\" and modelVisible=false. Unlinked tools omit widget hydration metadata, and protocol tests cover extension-key governance plus raw-memory/request-id redaction."
+    },
+    {
+      "id": "TASK-099",
+      "status": "done",
+      "evidence": [
+        "src/mcp/resources.rs",
+        "src/mcp/meta.rs",
+        "src/mcp/tools.rs",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "UI resource metadata includes explicit empty CSP domains, openai/widgetCSP, openai/widgetDomain, read-only/toolCalls=none markers, and tests fail on unsafe template-domain or _meta governance drift."
+    },
+    {
+      "id": "TASK-100",
+      "status": "done",
+      "evidence": [
+        "src/mcp/resources.rs",
+        "src/mcp/server.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "src/mcp/tools.rs",
+        "docs/tool-catalog.json",
+        "docs/server-manifest.json",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "resources/list and resources/templates/list support bounded opaque cursor pagination, invalid cursor errors, UI resource template metadata, and deterministic generated catalog/server-manifest drift gates."
+    },
+    {
+      "id": "TASK-101",
+      "status": "done",
+      "evidence": [
+        "src/artifact.rs",
+        "src/memory/reader.rs",
+        "src/memory/session.rs",
+        "src/info/thread.rs",
+        "src/info/sam.rs",
+        "src/info/kerberos.rs",
+        "src/orchestration/engine.rs",
+        "src/mcp/kernel_tool.rs",
+        "src/mcp/protocol.rs",
+        "src/mcp/resources.rs",
+        "src/mcp/tool_result.rs",
+        "src/mcp/action_registry.rs",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Existing file artifacts plus generated memory read raw/stealth/physical/scattered artifacts, explicit/auto scan_list candidate snapshots, target cred_dump/SAM/Kerberos outputs, kernel driver_pe_dump artifacts, large/explicit kernel driver_process_dump artifacts, explicit orchestration execute artifacts, and explicit/auto orchestration plan artifacts produce resource_link content blocks and expiring memoric://artifact/sha256/<hash> resources with hash verification, size, classification, retention metadata, and result_strategy reference metadata. Generated catalog/reference docs and compatibility/invocation docs expose the large-output artifact contract."
+    },
+    {
+      "id": "TASK-102",
+      "status": "done",
+      "evidence": [
+        "src/mcp/action_registry.rs",
+        "src/mcp/tools.rs",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md"
+      ],
+      "remaining": "Tool display metadata now includes titles, icon hints, and selection hints, and generated docs/cached catalog snapshots validate the runtime tool surface."
+    },
+    {
+      "id": "TASK-103",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tool_result.rs",
+        "src/mcp/protocol.rs",
+        "src/mcp/meta.rs",
+        "src/error.rs",
+        "src/policy.rs",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "policy_denied/access_denied tool errors include authorization challenge metadata, mirror WWW-Authenticate-compatible challenges into _meta.mcp/www_authenticate, map local action policy requirements, and keep next_steps advice read-only/no-bypass."
+    },
+    {
+      "id": "TASK-104",
+      "status": "done",
+      "evidence": [
+        "src/capability.rs",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md",
+        "docs/tool-catalog.json",
+        "docs/server-manifest.json"
+      ],
+      "remaining": "self(action='diagnostics') now exports an enterprise readiness bundle with audit, policy profile/hash, gateway assumptions, portable configuration snapshot, catalog/server-manifest/docs hashes, and warnings while omitting raw target data and full local paths."
+    },
+    {
+      "id": "TASK-105",
+      "status": "done",
+      "evidence": [
+        "src/mcp/resources.rs",
+        "src/mcp/conformance.rs",
+        "src/mcp/protocol.rs",
+        "src/mcp/request_context.rs",
+        "src/policy.rs",
+        "src/audit.rs",
+        "src/mcp/server.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs"
+      ],
+      "remaining": "App Bridge boundary fixtures now cover ui/initialize, ui/update-model-context, host-context notifications, and unsupported-host error paths across legacy, STDIO, and worker-style handlers."
+    },
+    {
+      "id": "TASK-106",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tools.rs",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md"
+      ],
+      "remaining": "Tool description lint now checks concise, safe, non-overlapping ergonomics and keeps selection hints visible in generated metadata."
+    },
+    {
+      "id": "TASK-107",
+      "status": "done",
+      "evidence": [
+        "src/policy.rs",
+        "src/audit.rs",
+        "src/capability.rs",
+        "docs/safety-model.md",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Policy profile files now load from MEMORIC_POLICY_PROFILE_PATH with SHA-256 and HMAC-SHA256 sidecar verification, fail closed on malformed or downgraded profiles, and report identity/status through policy, audit, and diagnostics surfaces."
+    },
+    {
+      "id": "TASK-108",
+      "status": "done",
+      "evidence": [
+        "scripts/generate_tool_catalog.py",
+        "docs/server-manifest.json",
+        "src/mcp/tools.rs",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md",
+        ".github/workflows/ci.yml"
+      ],
+      "remaining": "The generated static server manifest now records server/package identity, version, docs links, advertised capabilities, resource summary, and tool-catalog provenance, with tests and CI drift checks."
+    },
+    {
+      "id": "TASK-109",
+      "status": "done",
+      "evidence": [
+        "src/memory/session.rs",
+        "src/orchestration/engine.rs",
+        "src/artifact.rs",
+        "src/mcp/protocol.rs",
+        "src/mcp/resources.rs",
+        "src/mcp/tool_result.rs",
+        "src/mcp/tasks.rs",
+        "src/runtime.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Result strategy is now explicit in successful tool envelopes via metadata.result_strategy, distinguishing inline, paginated, streamed-progress, and reference/resource-link responses. Bounded cursor pagination covers scan session candidates and orchestration plan/execute arrays; scan_list, memory reads, and orchestration outputs generate retention-bound MCP resource links for large/reference outputs; streamed progress hooks cover memory scan_new, memory scan_next, orchestrate execute, and kernel driver_discover through task progress notifications; runtime cancellation and timeout checks are documented at stream/page boundaries."
+    },
+    {
+      "id": "TASK-110",
+      "status": "done",
+      "evidence": [
+        "src/observability.rs",
+        "src/audit.rs",
+        "src/mcp/tasks.rs",
+        "src/artifact.rs",
+        "src/mcp/tools.rs",
+        "src/mcp/protocol.rs",
+        "src/worker.rs",
+        "src/stdio_server.rs",
+        "src/mcp/server.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Correlation IDs now flow across MCP requests, task registry records, audit entries, worker IPC events, and result artifact registration/linking."
+    },
+    {
+      "id": "TASK-111",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tasks.rs",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Task status transitions are centralized behind lifecycle guards. Working/input_required tasks may move to active or terminal states, while completed, failed, and cancelled tasks cannot be reopened or overwritten by late worker updates. Tests cover completed-task late updates, cancelled-task late completion/failure, and direct terminal reopen rejection."
+    },
+    {
+      "id": "TASK-112",
+      "status": "done",
+      "evidence": [
+        "src/mcp/consent.rs",
+        "src/mcp/tasks.rs",
+        "src/mcp/conformance.rs",
+        "src/mcp/server.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Task records carry stable inputRequests metadata, schema/mode/requestState, tasks/input_response and tasks/update handlers, and deterministic request binding. Policy-gated params.task operations automatically pause as input_required, then resume with a one-time task/request/argument-hash-bound consent grant or fail with policy_denied from a later input response."
+    },
+    {
+      "id": "TASK-113",
+      "status": "done",
+      "evidence": [
+        "src/mcp/protocol.rs",
+        "src/mcp/tasks.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "docs/compatibility.md",
+        "docs/server-manifest.json"
+      ],
+      "remaining": "initialize explicitly marks tasks.requests.sampling.createMessage.supported=false and does not advertise a top-level sampling capability. Docs require future sampling support to reuse the same task registry, visibility scope, TTL, cancellation, result-retention, and correlation contract."
+    },
+    {
+      "id": "TASK-114",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tasks.rs",
+        "src/mcp/request_context.rs",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md",
+        "docs/streamable-http-adapter.md"
+      ],
+      "remaining": "Task records now carry visibility metadata from request context. Local single-user STDIO/worker/legacy requests keep full process-local visibility, while remote/app contexts scope tasks/list by matching session_id or app_origin so unrelated session tasks are not listed."
+    },
+    {
+      "id": "TASK-115",
+      "status": "done",
+      "evidence": [
+        "src/mcp/resources.rs",
+        "src/mcp/meta.rs",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "ui://memoric/dashboard hydrates a read-only operational dashboard from tasks, policy, audit summary, capability readiness, artifacts, timeline, state, and recent operation history without granting UI-originated mutation rights."
+    },
+    {
+      "id": "TASK-116",
+      "status": "done",
+      "evidence": [
+        "src/mcp/resources.rs",
+        "src/memory/session.rs",
+        "src/artifact.rs",
+        "src/mcp/meta.rs",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "ui://memoric/scans exposes paginated scan session/candidate data, strict redaction metadata, empty/error-safe scan_list fallback, and artifact registry context without inline raw byte leakage."
+    },
+    {
+      "id": "TASK-117",
+      "status": "done",
+      "evidence": [
+        "src/mcp/resources.rs",
+        "src/orchestration/engine.rs",
+        "src/orchestration/templates.rs",
+        "src/mcp/meta.rs",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "ui://memoric/plans exposes templates, dry-run plan previews, replay data, blocked steps, policy decisions, and capability blockers as read-only data before any live operation is approved."
+    },
+    {
+      "id": "TASK-118",
+      "status": "done",
+      "evidence": [
+        "src/mcp/request_context.rs",
+        "src/policy.rs",
+        "src/audit.rs",
+        "src/observability.rs",
+        "src/mcp/conformance.rs",
+        "src/mcp/protocol.rs",
+        "src/mcp/server.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Widget-originated tools/call metadata carries app origin into policy/audit/timeline and state-changing app-origin calls are rejected without explicit consent; App Bridge host-only and host-context notification boundaries are covered by conformance fixtures."
+    },
+    {
+      "id": "TASK-119",
+      "status": "done",
+      "evidence": [
+        "src/mcp/meta.rs",
+        "src/mcp/resources.rs",
+        "src/mcp/action_registry.rs",
+        "src/mcp/protocol.rs",
+        "src/mcp/tasks.rs",
+        "src/mcp/tools.rs",
+        "docs/tool-catalog.json",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Custom _meta keys are centralized and governed: Memoric keys use io.memoric/* with legacy x-memoric-* mirrors, reviewed standard compatibility keys are allowlisted, and runtime catalog/resource/error/task tests fail on ungoverned extension identifiers."
+    },
+    {
+      "id": "TASK-120",
+      "status": "done",
+      "evidence": [
+        "src/mcp/tool_result.rs",
+        "src/mcp/protocol.rs",
+        "src/mcp/meta.rs",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "policy_denied and access_denied results include machine-readable authorization challenge metadata plus WWW-Authenticate-compatible values in both structuredContent.authorization.www_authenticate and _meta.mcp/www_authenticate for future remote clients."
+    },
+    {
+      "id": "TASK-121",
+      "status": "done",
+      "evidence": [
+        "scripts/generate_tool_catalog.py",
+        "docs/server-manifest.json",
+        "src/mcp/tools.rs",
+        "docs/invocation-contract.md",
+        "docs/compatibility.md",
+        ".github/workflows/ci.yml"
+      ],
+      "remaining": "The generated static server manifest now records server/package identity, protocol version, advertised capabilities, resource summary, docs links, runtime provenance, and the byte-level docs/tool-catalog.json SHA-256 hash. Tests compare the manifest against initialize, resources/list, package metadata, and the committed catalog hash; CI already regenerates docs through scripts/generate_tool_catalog.py and fails on docs drift."
+    },
+    {
+      "id": "TASK-122",
+      "status": "done",
+      "evidence": [
+        "docs/streamable-http-adapter.md",
+        "docs/architecture.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Streamable HTTP design now documents POST/GET/DELETE mapping, SSE delivery, MCP-Protocol-Version, Mcp-Session-Id, Last-Event-ID replay, adapter-local session state, worker bridge compatibility, polling fallback, and required HTTP security gates. No HTTP listener is enabled yet; implementation remains gated behind TASK-124 and TASK-125."
+    },
+    {
+      "id": "TASK-123",
+      "status": "done",
+      "evidence": [
+        "src/mcp/request_context.rs",
+        "src/mcp/mod.rs",
+        "src/mcp/tasks.rs",
+        "docs/architecture.md",
+        "docs/streamable-http-adapter.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Transport-neutral McpRequestContext now captures request ID, protocol version, session ID, stream ID, Last-Event-ID, progress token, task ID, app origin, policy origin, audit correlation ID, and redaction profile. It supports adapter-provided header metadata and JSON-RPC _meta extraction, and task options reuse the shared progress token parser."
+    },
+    {
+      "id": "TASK-124",
+      "status": "done",
+      "evidence": [
+        "src/mcp/conformance.rs",
+        "src/mcp/mod.rs",
+        "src/mcp/server.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "src/ipc/client.rs",
+        "src/ipc/server.rs",
+        "tests/stdio_subprocess.rs",
+        "docs/architecture.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Shared JSON-RPC conformance runner replays the same core and adversarial cases through legacy handler, direct STDIO in-process handling, and worker-style in-process handling. Real subprocess STDIO stream replay covers mixed line-delimited requests without pipe backpressure deadlocks, and worker named-pipe replay covers mixed-message framing. Future HTTP/streamable adapter coverage will join the same runner when a concrete adapter exists."
+    },
+    {
+      "id": "TASK-125",
+      "status": "done",
+      "evidence": [
+        "src/mcp/conformance.rs",
+        "src/mcp/protocol.rs",
+        "src/mcp/server.rs",
+        "src/stdio_server.rs",
+        "src/worker.rs",
+        "docs/architecture.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Adversarial JSON-RPC corpus now covers invalid ids, batch-like and non-object shapes, invalid jsonrpc/method types, invalid cursors, negative limits, oversized bounded params, unknown methods, and notification/request confusion. The same suite runs against legacy, direct STDIO in-process, and worker-style in-process handlers, and protocol validation is centralized for future adapters."
+    },
+    {
+      "id": "TASK-126",
+      "status": "done",
+      "evidence": [
+        "src/memory/session.rs",
+        "src/orchestration/engine.rs",
+        "src/mcp/tools.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "scan_list session candidate pages and orchestration plan/execute result arrays now support bounded pagination with opaque nextCursor tokens, positive limit validation, and snapshot mismatch errors."
+    },
+    {
+      "id": "TASK-127",
+      "status": "done",
+      "evidence": [
+        "src/artifact.rs",
+        "src/mcp/protocol.rs",
+        "src/mcp/resources.rs",
+        "src/mcp/tool_result.rs",
+        "src/mcp/action_registry.rs",
+        "src/mcp/tools.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Existing file artifacts are registered as expiring memoric://artifact/sha256/<hash> resources, emitted as resource_link content blocks, served through resources/read after SHA-256 verification, classified as artifact references/public metadata, and exposed through a cleanup dry-run preview."
+    },
+    {
+      "id": "TASK-128",
+      "status": "done",
+      "evidence": [
+        "src/capability.rs",
+        "src/mcp/tools.rs",
+        "src/mcp/action_registry.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "docs/compatibility.md",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md"
+      ],
+      "remaining": "self(action='diagnostics') now exports an operator-safe JSON artifact containing compatibility, policy hash/status, audit config, capability-diff watch metadata, docs/catalog hashes, warnings, and recent task summaries while omitting raw target data and full local paths."
+    },
+    {
+      "id": "TASK-129",
+      "status": "done",
+      "evidence": [
+        "src/mcp/action_registry.rs",
+        "src/mcp/tools.rs",
+        "scripts/generate_tool_catalog.py",
+        "docs/tool-catalog.json",
+        "docs/tool-reference.md",
+        "docs/server-manifest.json",
+        "docs/architecture.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "Tool metadata now includes display titles, icon hints, and selection hints through x-memoric-display and annotations.memoric. Generated docs expose the fields, and tests lint concise/model-safe descriptions while keeping display metadata separate from policy traits."
+    },
+    {
+      "id": "TASK-130",
+      "status": "done",
+      "evidence": [
+        "src/observability.rs",
+        "src/mcp/resources.rs",
+        "src/mcp/tasks.rs",
+        "src/audit.rs",
+        "src/artifact.rs",
+        "src/worker.rs",
+        "src/stdio_server.rs",
+        "src/mcp/server.rs",
+        "docs/invocation-contract.md",
+        "docs/architecture.md",
+        "docs/compatibility.md"
+      ],
+      "remaining": "The read-only timeline now links MCP request, task lifecycle, progress notifications, audit entries, worker IPC events, and artifacts by correlation ID, with classification-aware redaction and resource exposure."
+    }
+  ],
+  "next_recommended_wave": []
+}

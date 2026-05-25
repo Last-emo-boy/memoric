@@ -205,6 +205,22 @@ static volatile LONG g_IoctlFailed = 0;
 static volatile LONG g_IoctlException = 0;
 static volatile LONG g_InFlightIoctls = 0;
 
+#define MEMORIC_CAPABILITY_FLAGS ( \
+    MEMORIC_CAP_PHYSICAL_MEMORY | \
+    MEMORIC_CAP_VIRTUAL_MEMORY | \
+    MEMORIC_CAP_PROCESS_INFO | \
+    MEMORIC_CAP_KERNEL_WRITE | \
+    MEMORIC_CAP_PROCESS_ENUM | \
+    MEMORIC_CAP_CALLBACKS | \
+    MEMORIC_CAP_REGISTRY_PROTECT | \
+    MEMORIC_CAP_NOTIFICATIONS | \
+    MEMORIC_CAP_PROCESS_DUMP | \
+    MEMORIC_CAP_HYPERVISOR_DETECT | \
+    MEMORIC_CAP_TESTSIGN | \
+    MEMORIC_CAP_GLOBAL_HOOKS | \
+    MEMORIC_CAP_KERNEL_EXEC | \
+    MEMORIC_CAP_DESTRUCTIVE_OPS)
+
 /* ================================================================
  * Driver forward declarations
  * ================================================================ */
@@ -4609,7 +4625,7 @@ static NTSTATUS HandleDriverStats(
     resp->ExceptionCount    = (ULONG)g_IoctlException;
     resp->OpenHandles       = (ULONG)g_OpenHandles;
     resp->BuildNumber       = g_Offsets.BuildNumber;
-    resp->DriverVersion     = (1 << 16) | 0; /* v1.0 */
+    resp->DriverVersion     = MEMORIC_DRIVER_VERSION;
     resp->OffsetsResolved   = g_Offsets.Resolved ? 1 : 0;
     resp->NotifyProcessActive = g_NotifyProcessRegistered ? 1 : 0;
     resp->NotifyThreadActive  = g_NotifyThreadRegistered ? 1 : 0;
@@ -4641,6 +4657,37 @@ static NTSTATUS HandleDriverStats(
     }
 
     *BytesReturned = sizeof(MEMORIC_DRIVER_STATS);
+    return STATUS_SUCCESS;
+}
+
+/* ── HandleCapabilities ─ driver ABI/capability handshake ─────────── */
+static NTSTATUS HandleCapabilities(
+    PVOID   SystemBuffer,
+    ULONG   InputLength,
+    ULONG   OutputLength,
+    PULONG  BytesReturned)
+{
+    PMEMORIC_CAPABILITIES_RESPONSE resp;
+
+    UNREFERENCED_PARAMETER(InputLength);
+
+    if (OutputLength < sizeof(MEMORIC_CAPABILITIES_RESPONSE))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    resp = (PMEMORIC_CAPABILITIES_RESPONSE)SystemBuffer;
+    RtlZeroMemory(resp, sizeof(MEMORIC_CAPABILITIES_RESPONSE));
+
+    resp->Size = sizeof(MEMORIC_CAPABILITIES_RESPONSE);
+    resp->AbiVersion = MEMORIC_ABI_VERSION;
+    resp->DriverVersion = MEMORIC_DRIVER_VERSION;
+    resp->BuildNumber = g_Offsets.BuildNumber;
+    resp->MaxIoSize = MEMORIC_MAX_IO_SIZE;
+    resp->MaxForceWrite = MEMORIC_MAX_FORCE_WRITE;
+    resp->OffsetsResolved = g_Offsets.Resolved ? 1 : 0;
+    resp->CapabilityFlags = MEMORIC_CAPABILITY_FLAGS;
+    resp->CapabilityFlags2 = 0;
+
+    *BytesReturned = sizeof(MEMORIC_CAPABILITIES_RESPONSE);
     return STATUS_SUCCESS;
 }
 
@@ -12449,6 +12496,7 @@ static ULONG ClassifyIoctl(ULONG ioctl)
     case IOCTL_MEMORIC_HYPERVISOR_DETECT:
     case IOCTL_MEMORIC_GET_MODULE_BASE:
     case IOCTL_MEMORIC_CRED_DUMP:
+    case IOCTL_MEMORIC_CAPABILITIES:
         return IOCTL_ACCESS_READONLY;
 
     /* Modify — alter state but generally reversible */
@@ -12655,6 +12703,9 @@ static NTSTATUS MemoricDispatchIoctl(
         break;
     case IOCTL_MEMORIC_DRIVER_STATS:
         status = HandleDriverStats(systemBuffer, inputLength, outputLength, bytesReturned);
+        break;
+    case IOCTL_MEMORIC_CAPABILITIES:
+        status = HandleCapabilities(systemBuffer, inputLength, outputLength, bytesReturned);
         break;
     case IOCTL_MEMORIC_MEMORY_POOL:
         status = HandleMemoryPool(systemBuffer, inputLength, outputLength, bytesReturned);

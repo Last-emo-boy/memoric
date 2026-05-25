@@ -20,12 +20,70 @@ use crate::safe_handle::SafeHandle;
 use crate::util::parse_address;
 use serde_json::Value;
 
+fn provenance_json(args: &Value) -> Value {
+    serde_json::json!({
+        "correlation_id": crate::observability::correlation_id_from_args(args),
+        "request_id": args.get("request_id").cloned().unwrap_or(Value::Null),
+        "task_id": args.get("task_id").cloned().unwrap_or(Value::Null),
+        "chain_id": args.get("chain_id").cloned().unwrap_or(Value::Null),
+        "purpose": args.get("purpose").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn restore_removed_iat_hook_pointer_rollback(
+    pid: u64,
+    iat_address: u64,
+    original_address: u64,
+    replaced_address: Option<u64>,
+) -> Value {
+    let iat_address_json = crate::memory::rollback::format_address(iat_address);
+    let original_address_json = crate::memory::rollback::format_address(original_address);
+
+    let Some(replaced_address) = replaced_address else {
+        return serde_json::json!({
+            "available": false,
+            "strategy": "none",
+            "captured_fields": ["pid", "iat_address", "original_address"],
+            "iat_address": iat_address_json,
+            "original_address": original_address_json,
+            "hook_address": Value::Null,
+            "args": Value::Null,
+            "action": Value::Null,
+            "detail": "remove_iat could not capture the hook pointer before restoring the original IAT pointer",
+        });
+    };
+
+    let hook_address_json = crate::memory::rollback::format_address(replaced_address);
+    let action_args = serde_json::json!({
+        "pid": pid,
+        "iat_address": iat_address_json,
+        "original_address": hook_address_json,
+    });
+
+    serde_json::json!({
+        "available": true,
+        "strategy": "restore_removed_iat_hook_pointer",
+        "captured_fields": ["pid", "iat_address", "hook_address"],
+        "iat_address": action_args["iat_address"],
+        "original_address": original_address_json,
+        "hook_address": action_args["original_address"],
+        "args": action_args.clone(),
+        "action": {
+            "tool": "hook",
+            "action": "remove_iat",
+            "args": action_args,
+        },
+        "detail": "remove_iat captured the hook pointer before restoring the original IAT pointer",
+    })
+}
+
 /// Force write memory - aggressive version with automatic protection bypass
 pub fn force_write(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
     use windows::Win32::System::Memory::{VirtualProtectEx, PAGE_EXECUTE_READWRITE};
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_WRITE,
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ,
+        PROCESS_VM_WRITE,
     };
 
     let pid = args
@@ -50,7 +108,7 @@ pub fn force_write(args: &Value) -> Result<Value, MemoricError> {
 
     unsafe {
         let handle = OpenProcess(
-            PROCESS_QUERY_INFORMATION | PROCESS_VM_WRITE | PROCESS_VM_OPERATION,
+            PROCESS_QUERY_INFORMATION | PROCESS_VM_WRITE | PROCESS_VM_READ | PROCESS_VM_OPERATION,
             false,
             pid as u32,
         )
@@ -62,6 +120,9 @@ pub fn force_write(args: &Value) -> Result<Value, MemoricError> {
             .filter_map(|v| v.as_u64())
             .map(|v| v as u8)
             .collect();
+
+        let original =
+            crate::memory::rollback::capture_original_bytes(*handle, address, byte_vec.len());
 
         // Always bypass protection
         let mut old_protect = windows::Win32::System::Memory::PAGE_PROTECTION_FLAGS(0);
@@ -86,12 +147,14 @@ pub fn force_write(args: &Value) -> Result<Value, MemoricError> {
         .map_err(|e| MemoricError::WindowsApi(format!("Failed to write memory: {}", e)))?;
 
         // Restore original protection
+        let captured_old_protect = old_protect;
+        let mut restored_protect = windows::Win32::System::Memory::PAGE_PROTECTION_FLAGS(0);
         let _ = VirtualProtectEx(
             *handle,
             address as *mut _,
             byte_vec.len(),
-            old_protect,
-            &mut old_protect,
+            captured_old_protect,
+            &mut restored_protect,
         );
 
         Ok(serde_json::json!({
@@ -99,7 +162,16 @@ pub fn force_write(args: &Value) -> Result<Value, MemoricError> {
             "address": format!("0x{:016X}", address),
             "bytes_written": bytes_written,
             "success": true,
-            "protection_bypassed": true
+            "protection_bypassed": true,
+            "old_protect": captured_old_protect.0,
+            "rollback": crate::memory::rollback::restore_original_bytes_rollback(
+                pid,
+                address,
+                &original,
+                Some(captured_old_protect.0),
+                true,
+            ),
+            "provenance": provenance_json(args)
         }))
     }
 }
@@ -2090,10 +2162,11 @@ pub fn find_iat_entry(args: &Value) -> Result<Value, MemoricError> {
 /// Hook a function via IAT
 /// Task 3.3: Implement IAT hook core logic
 pub fn iat_unhook(args: &Value) -> Result<Value, MemoricError> {
-    use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
+    use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
     use windows::Win32::System::Memory::{VirtualProtectEx, PAGE_EXECUTE_READWRITE};
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_WRITE,
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ,
+        PROCESS_VM_WRITE,
     };
 
     let pid = args
@@ -2113,12 +2186,26 @@ pub fn iat_unhook(args: &Value) -> Result<Value, MemoricError> {
 
     unsafe {
         let handle = OpenProcess(
-            PROCESS_QUERY_INFORMATION | PROCESS_VM_WRITE | PROCESS_VM_OPERATION,
+            PROCESS_QUERY_INFORMATION | PROCESS_VM_WRITE | PROCESS_VM_READ | PROCESS_VM_OPERATION,
             false,
             pid as u32,
         )
         .map_err(|e| MemoricError::WindowsApi(format!("Failed to open process: {}", e)))?;
         let handle = SafeHandle::new(handle);
+
+        let mut replaced_address = 0u64;
+        let mut replaced_address_capture = None;
+        if ReadProcessMemory(
+            *handle,
+            iat_address as *const _,
+            &mut replaced_address as *mut _ as *mut _,
+            8,
+            None,
+        )
+        .is_ok()
+        {
+            replaced_address_capture = Some(replaced_address);
+        }
 
         // Change IAT protection to RW
         let mut old_protect = windows::Win32::System::Memory::PAGE_PROTECTION_FLAGS(0);
@@ -2155,7 +2242,21 @@ pub fn iat_unhook(args: &Value) -> Result<Value, MemoricError> {
         Ok(serde_json::json!({
             "success": true,
             "message": "IAT hook removed successfully",
-            "pid": pid
+            "pid": pid,
+            "iat_address": crate::memory::rollback::format_address(iat_address),
+            "original_address": crate::memory::rollback::format_address(original_address),
+            "replaced_address": replaced_address_capture
+                .map(crate::memory::rollback::format_address)
+                .map(serde_json::Value::String)
+                .unwrap_or(Value::Null),
+            "old_protect": old_protect.0,
+            "rollback": restore_removed_iat_hook_pointer_rollback(
+                pid,
+                iat_address,
+                original_address,
+                replaced_address_capture,
+            ),
+            "provenance": provenance_json(args)
         }))
     }
 }

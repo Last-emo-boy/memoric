@@ -10,7 +10,8 @@ pub fn write_memory(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
     use windows::Win32::System::Memory::{VirtualQueryEx, MEMORY_BASIC_INFORMATION};
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_WRITE,
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ,
+        PROCESS_VM_WRITE,
     };
 
     // Log raw args for MCP debugging
@@ -65,7 +66,7 @@ pub fn write_memory(args: &Value) -> Result<Value, MemoricError> {
 
     unsafe {
         let handle = OpenProcess(
-            PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION,
+            PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_QUERY_INFORMATION,
             false,
             pid as u32,
         )
@@ -106,6 +107,9 @@ pub fn write_memory(args: &Value) -> Result<Value, MemoricError> {
             );
         }
 
+        let original =
+            crate::memory::rollback::capture_original_bytes(*handle, address, byte_vec.len());
+
         let ptr = address as *const std::ffi::c_void;
         tracing::info!(
             "[write_memory] handle={:?} ptr={:?} len={}",
@@ -144,7 +148,15 @@ pub fn write_memory(args: &Value) -> Result<Value, MemoricError> {
 
         Ok(serde_json::json!({
             "success": true,
-            "bytes_written": bytes_written
+            "bytes_written": bytes_written,
+            "address": crate::memory::rollback::format_address(address),
+            "rollback": crate::memory::rollback::restore_original_bytes_rollback(
+                pid,
+                address,
+                &original,
+                if query_result > 0 { Some(mbi.Protect.0) } else { None },
+                false,
+            )
         }))
     }
 }
@@ -200,6 +212,9 @@ pub fn force_write(args: &Value) -> Result<Value, MemoricError> {
         .map_err(|e| MemoricError::WindowsApi(format!("Failed to open process: {}", e)))?;
         let handle = SafeHandle::new(handle);
 
+        let original =
+            crate::memory::rollback::capture_original_bytes(*handle, address, byte_vec.len());
+
         // First, change protection to RWX
         let mut old_protect = PAGE_PROTECTION_FLAGS(0);
         VirtualProtectEx(
@@ -245,7 +260,127 @@ pub fn force_write(args: &Value) -> Result<Value, MemoricError> {
         Ok(serde_json::json!({
             "success": true,
             "bytes_written": bytes_written,
-            "old_protect": old_protect.0
+            "address": crate::memory::rollback::format_address(address),
+            "old_protect": old_protect.0,
+            "rollback": crate::memory::rollback::restore_original_bytes_rollback(
+                pid,
+                address,
+                &original,
+                Some(old_protect.0),
+                true,
+            )
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn write_memory_updates_current_process_buffer_with_integer_address() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let mut buffer = vec![0u8; 8];
+        let address = buffer.as_mut_ptr() as u64;
+
+        let result = write_memory(&json!({
+            "pid": std::process::id(),
+            "address": address,
+            "bytes": [0x10, 0x20, 0x30, 0x40]
+        }))
+        .expect("write_memory should update current process buffer");
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["bytes_written"], 4);
+        assert_eq!(result["rollback"]["available"], true);
+        assert_eq!(result["rollback"]["strategy"], "restore_original_bytes");
+        assert_eq!(result["rollback"]["original_bytes"], json!([0, 0, 0, 0]));
+        assert_eq!(result["rollback"]["action"]["tool"], "memory");
+        assert_eq!(result["rollback"]["action"]["action"], "write");
+        assert_eq!(
+            result["rollback"]["action"]["args"]["bytes"],
+            json!([0, 0, 0, 0])
+        );
+        assert_eq!(&buffer[..4], &[0x10, 0x20, 0x30, 0x40]);
+        assert_eq!(&buffer[4..], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn write_memory_updates_current_process_buffer_with_hex_address() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let mut buffer = vec![0xAAu8; 6];
+        let address = format!("0x{:X}", buffer.as_mut_ptr() as u64);
+
+        let result = write_memory(&json!({
+            "pid": std::process::id(),
+            "address": address,
+            "bytes": [0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02]
+        }))
+        .expect("write_memory should parse hex address");
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["bytes_written"], 6);
+        assert_eq!(
+            result["rollback"]["original_bytes"],
+            json!([0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA])
+        );
+        assert_eq!(&buffer, &[0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02]);
+    }
+
+    #[test]
+    fn write_memory_rejects_empty_or_non_integer_bytes() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let mut buffer = vec![0u8; 4];
+        let address = buffer.as_mut_ptr() as u64;
+
+        let err = write_memory(&json!({
+            "pid": std::process::id(),
+            "address": address,
+            "bytes": []
+        }))
+        .expect_err("empty byte array should be rejected");
+        assert!(err.to_string().contains("No valid bytes"));
+
+        let err = write_memory(&json!({
+            "pid": std::process::id(),
+            "address": address,
+            "bytes": ["not-a-byte"]
+        }))
+        .expect_err("non-integer byte array should be rejected");
+        assert!(err.to_string().contains("No valid bytes"));
+    }
+
+    #[test]
+    fn force_write_updates_current_process_buffer_and_reports_old_protection() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        let mut buffer = vec![0xAAu8; 8];
+        let address = buffer.as_mut_ptr() as u64;
+
+        let result = force_write(&json!({
+            "pid": std::process::id(),
+            "address": address,
+            "bytes": [0xFE, 0xED, 0xFA, 0xCE]
+        }))
+        .expect("force_write should update current process buffer");
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["bytes_written"], 4);
+        assert!(result["old_protect"].as_u64().is_some());
+        assert_eq!(result["rollback"]["available"], true);
+        assert_eq!(
+            result["rollback"]["captured_fields"],
+            json!(["pid", "address", "size", "original_bytes", "old_protection"])
+        );
+        assert_eq!(
+            result["rollback"]["original_bytes"],
+            json!([0xAA, 0xAA, 0xAA, 0xAA])
+        );
+        assert_eq!(result["rollback"]["old_protection"], result["old_protect"]);
+        assert_eq!(&buffer[..4], &[0xFE, 0xED, 0xFA, 0xCE]);
+        assert_eq!(&buffer[4..], &[0xAA, 0xAA, 0xAA, 0xAA]);
     }
 }

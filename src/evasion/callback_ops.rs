@@ -275,13 +275,13 @@ pub fn callback_masquerade(args: &Value) -> Result<Value, MemoricError> {
         .unwrap_or("process");
     let callback_index = args
         .get("callback_index")
-        .and_then(|v| v.as_u64())
+        .and_then(crate::args::parse_u64)
         .ok_or_else(|| {
             MemoricError::Other("callback_masquerade requires 'callback_index'".to_string())
         })?;
     let array_address = args
         .get("array_address")
-        .and_then(|v| v.as_u64())
+        .and_then(crate::util::parse_address)
         .ok_or_else(|| {
             MemoricError::Other("callback_masquerade requires 'array_address'".to_string())
         })?;
@@ -291,9 +291,10 @@ pub fn callback_masquerade(args: &Value) -> Result<Value, MemoricError> {
         .ok_or_else(|| MemoricError::Other("Missing device_path".to_string()))?;
     let ioctl_write_code = args
         .get("ioctl_write_code")
-        .and_then(|v| v.as_u64())
+        .and_then(crate::args::parse_u64)
         .ok_or_else(|| MemoricError::Other("Missing ioctl_write_code".to_string()))?
-        as u32;
+        .try_into()
+        .map_err(|_| MemoricError::Other("ioctl_write_code exceeds u32 range".to_string()))?;
 
     tracing::warn!(
         "[CALLBACK_OPS] Masquerading {} callback index {} at 0x{:016X}",

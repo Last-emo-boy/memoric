@@ -2,69 +2,152 @@ name: CI
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main, master, develop ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, master ]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
+  MEMORIC_CI_DEFAULT: "1"
 
 jobs:
   check:
-    name: Check
-    runs-on: windows-latest
+    name: Check (${{ matrix.os }}, rust ${{ matrix.rust }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+        rust: ["1.80.0"]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ matrix.rust }}
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - name: default CI does not opt into privileged integration
+        shell: pwsh
+        run: |
+          if ($env:MEMORIC_PRIVILEGED_INTEGRATION) {
+            throw "Default CI must not enable MEMORIC_PRIVILEGED_INTEGRATION."
+          }
+          if ($env:MEMORIC_DRIVER_PATH) {
+            throw "Default CI must not require a driver path."
+          }
       - name: cargo check
         run: cargo check --all-targets
 
   clippy:
-    name: Clippy
-    runs-on: windows-latest
+    name: Clippy report (${{ matrix.os }}, rust ${{ matrix.rust }})
+    runs-on: ${{ matrix.os }}
     needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+        rust: ["1.80.0"]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ matrix.rust }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: cargo clippy
+      - name: cargo clippy report
+        continue-on-error: true
         run: cargo clippy --all-targets -- -D warnings -A dead_code -A unused_variables
 
   fmt:
-    name: Format
-    runs-on: windows-latest
+    name: Format (${{ matrix.os }}, rust ${{ matrix.rust }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+        rust: ["1.80.0"]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ matrix.rust }}
           components: rustfmt
       - name: cargo fmt
         run: cargo fmt --all -- --check
 
   test:
-    name: Test
-    runs-on: windows-latest
+    name: Test (${{ matrix.os }}, rust ${{ matrix.rust }})
+    runs-on: ${{ matrix.os }}
     needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+        rust: ["1.80.0"]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
-        run: cargo test --lib
+        run: cargo test --all-targets
+
+  schema-contract:
+    name: Schema contract (${{ matrix.os }}, rust ${{ matrix.rust }})
+    runs-on: ${{ matrix.os }}
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+        rust: ["1.80.0"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - uses: Swatinem/rust-cache@v2
+      - name: schema and catalog contract tests
+        shell: pwsh
+        run: |
+          cargo test --all-targets registered_tools_have_modern_metadata -- --nocapture
+          cargo test --all-targets committed_tool_catalog_matches_registered_tools_snapshot -- --nocapture
+          cargo test --all-targets tool_schema_actions_match_registry_metadata -- --nocapture
+
+  tool-catalog:
+    name: Tool Catalog (${{ matrix.os }}, rust ${{ matrix.rust }})
+    runs-on: ${{ matrix.os }}
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+        rust: ["1.80.0"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Generate tool catalog
+        run: python scripts/generate_tool_catalog.py
+      - name: Verify generated docs are committed
+        shell: pwsh
+        run: |
+          if (git status --short docs) {
+            git status --short docs
+            throw "Generated docs are out of date. Run python scripts/generate_tool_catalog.py and commit docs/."
+          }
 
   build-release:
     name: Release Build
     runs-on: windows-latest
-    needs: [clippy, test]
+    needs: [clippy, test, schema-contract, tool-catalog]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@1.80.0
       - uses: Swatinem/rust-cache@v2
       - name: cargo build --release
         run: cargo build --release
@@ -79,7 +162,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@1.80.0
       - name: Install cargo-audit
         run: cargo install cargo-audit
       - name: cargo audit

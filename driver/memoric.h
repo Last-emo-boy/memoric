@@ -24,6 +24,10 @@
 #define MEMORIC_SYMLINK_NAME    L"\\DosDevices\\Memoric"
 #define MEMORIC_USERMODE_PATH   "\\\\.\\Memoric"
 #define MEMORIC_DEVICE_TYPE     0x8000
+#define MEMORIC_ABI_VERSION     1
+#define MEMORIC_DRIVER_VERSION_MAJOR 1
+#define MEMORIC_DRIVER_VERSION_MINOR 1
+#define MEMORIC_DRIVER_VERSION  ((MEMORIC_DRIVER_VERSION_MAJOR << 16) | MEMORIC_DRIVER_VERSION_MINOR)
 
 /* ================================================================
  * IOCTL Codes (METHOD_BUFFERED, FILE_ANY_ACCESS)
@@ -110,6 +114,7 @@
 #define IOCTL_MEMORIC_MINIFILTER_DETACH CTL_CODE(MEMORIC_DEVICE_TYPE, 0x83D, METHOD_BUFFERED, FILE_ANY_ACCESS) /* 0x800020F4 */
 #define IOCTL_MEMORIC_KERNEL_APC_INJECT CTL_CODE(MEMORIC_DEVICE_TYPE, 0x83F, METHOD_BUFFERED, FILE_ANY_ACCESS) /* 0x800020FC */
 #define IOCTL_MEMORIC_WFP_REMOVE        CTL_CODE(MEMORIC_DEVICE_TYPE, 0x840, METHOD_BUFFERED, FILE_ANY_ACCESS) /* 0x80002100 */
+#define IOCTL_MEMORIC_CAPABILITIES      CTL_CODE(MEMORIC_DEVICE_TYPE, 0x841, METHOD_BUFFERED, FILE_ANY_ACCESS) /* 0x80002104 */
 
 /* ================================================================
  * Limits
@@ -118,6 +123,21 @@
 #define MEMORIC_MAX_IO_SIZE         (4 * 1024 * 1024)   /* 4 MB max transfer */
 #define MEMORIC_MAX_FORCE_WRITE     4096                 /* 4 KB max force-write */
 #define MEMORIC_POOL_TAG            'croM'               /* "Mcro" */
+
+#define MEMORIC_CAP_PHYSICAL_MEMORY     (1ULL << 0)
+#define MEMORIC_CAP_VIRTUAL_MEMORY      (1ULL << 1)
+#define MEMORIC_CAP_PROCESS_INFO        (1ULL << 2)
+#define MEMORIC_CAP_KERNEL_WRITE        (1ULL << 3)
+#define MEMORIC_CAP_PROCESS_ENUM        (1ULL << 4)
+#define MEMORIC_CAP_CALLBACKS           (1ULL << 5)
+#define MEMORIC_CAP_REGISTRY_PROTECT    (1ULL << 6)
+#define MEMORIC_CAP_NOTIFICATIONS       (1ULL << 7)
+#define MEMORIC_CAP_PROCESS_DUMP        (1ULL << 8)
+#define MEMORIC_CAP_HYPERVISOR_DETECT   (1ULL << 9)
+#define MEMORIC_CAP_TESTSIGN            (1ULL << 10)
+#define MEMORIC_CAP_GLOBAL_HOOKS        (1ULL << 11)
+#define MEMORIC_CAP_KERNEL_EXEC         (1ULL << 12)
+#define MEMORIC_CAP_DESTRUCTIVE_OPS     (1ULL << 13)
 
 /* ================================================================
  * Request / Response Structures
@@ -245,7 +265,7 @@ typedef struct _MEMORIC_PROCESS_ENTRY {
     UCHAR   Protection;         /* PS_PROTECTION value */
     UCHAR   Reserved[7];
 } MEMORIC_PROCESS_ENTRY, *PMEMORIC_PROCESS_ENTRY;
-/* sizeof = 64 */
+/* sizeof = 56 */
 
 /* Process enumeration request */
 typedef struct _MEMORIC_ENUM_PROCESS_REQUEST {
@@ -513,6 +533,20 @@ typedef struct _MEMORIC_OBJECT_HOOK_RESPONSE {
     ULONG   ProtectedPid;
     ULONG   StrippedAccess;
 } MEMORIC_OBJECT_HOOK_RESPONSE, *PMEMORIC_OBJECT_HOOK_RESPONSE;
+
+typedef struct _MEMORIC_CAPABILITIES_RESPONSE {
+    ULONG   Size;               /* sizeof(MEMORIC_CAPABILITIES_RESPONSE) */
+    ULONG   AbiVersion;         /* MEMORIC_ABI_VERSION */
+    ULONG   DriverVersion;      /* MEMORIC_DRIVER_VERSION */
+    ULONG   BuildNumber;        /* Windows build used for resolved offsets */
+    ULONG   MaxIoSize;          /* MEMORIC_MAX_IO_SIZE */
+    ULONG   MaxForceWrite;      /* MEMORIC_MAX_FORCE_WRITE */
+    ULONG   OffsetsResolved;    /* 1 if EPROCESS offsets resolved */
+    ULONG   Reserved;
+    ULONG64 CapabilityFlags;    /* MEMORIC_CAP_* bitmap */
+    ULONG64 CapabilityFlags2;   /* reserved for future flags */
+} MEMORIC_CAPABILITIES_RESPONSE, *PMEMORIC_CAPABILITIES_RESPONSE;
+/* sizeof = 48 */
 
 /* ── Driver Health/Stats ──────────────────────────────────────────── */
 typedef struct _MEMORIC_DRIVER_STATS {

@@ -3,7 +3,150 @@
 
 use crate::error::MemoricError;
 use crate::util::parse_address;
-use serde_json::Value;
+use serde_json::{json, Value};
+
+fn provenance_json(args: &Value) -> Value {
+    json!({
+        "correlation_id": crate::observability::correlation_id_from_args(args),
+        "request_id": args.get("request_id").cloned().unwrap_or(Value::Null),
+        "task_id": args.get("task_id").cloned().unwrap_or(Value::Null),
+        "chain_id": args.get("chain_id").cloned().unwrap_or(Value::Null),
+        "purpose": args.get("purpose").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn hwbp_control_bits(dr7: u64, register: usize) -> u64 {
+    (dr7 >> (16 + register * 4)) & 0xF
+}
+
+fn hwbp_condition_from_control(control_bits: u64) -> u64 {
+    control_bits & 0x3
+}
+
+fn hwbp_local_enabled(dr7: u64, register: usize) -> bool {
+    dr7 & (1u64 << (register * 2)) != 0
+}
+
+fn hwbp_global_enabled(dr7: u64, register: usize) -> bool {
+    dr7 & (1u64 << (register * 2 + 1)) != 0
+}
+
+fn hwbp_remove_args(tid: u32, register: usize) -> Value {
+    json!({
+        "tid": tid,
+        "dr_index": register,
+    })
+}
+
+fn hwbp_install_args(tid: u32, register: usize, address: u64, condition: u64) -> Value {
+    json!({
+        "tid": tid,
+        "target_address": crate::memory::rollback::format_address(address),
+        "dr_index": register,
+        "condition": condition,
+    })
+}
+
+fn hwbp_install_rollback(tid: u32, register: usize, previous_dr: u64, previous_dr7: u64) -> Value {
+    let previous_local_enabled = hwbp_local_enabled(previous_dr7, register);
+    let previous_global_enabled = hwbp_global_enabled(previous_dr7, register);
+    let previous_control_bits = hwbp_control_bits(previous_dr7, register);
+    let previous_condition = hwbp_condition_from_control(previous_control_bits);
+
+    let mut rollback = json!({
+        "available": true,
+        "strategy": "remove_hardware_breakpoint",
+        "captured_fields": [
+            "tid",
+            "dr_index",
+            "previous_dr",
+            "previous_dr7",
+            "previous_control_bits",
+            "previous_local_enabled",
+            "previous_global_enabled"
+        ],
+        "previous_dr": crate::memory::rollback::format_address(previous_dr),
+        "previous_dr7": format!("0x{:016X}", previous_dr7),
+        "previous_control_bits": previous_control_bits,
+        "previous_local_enabled": previous_local_enabled,
+        "previous_global_enabled": previous_global_enabled,
+        "args": hwbp_remove_args(tid, register),
+        "action": {
+            "tool": "hook",
+            "action": "remove_hwbp",
+            "args": hwbp_remove_args(tid, register),
+        },
+        "detail": "new hardware breakpoint can be removed with hook(action='remove_hwbp')",
+    });
+
+    if previous_local_enabled
+        || previous_global_enabled
+        || previous_dr != 0
+        || previous_control_bits != 0
+    {
+        let args = hwbp_install_args(tid, register, previous_dr, previous_condition);
+        rollback["available"] = json!("partial");
+        rollback["strategy"] = json!("restore_previous_hardware_breakpoint");
+        rollback["reason"] = json!("debug_register_previously_configured");
+        rollback["args"] = args.clone();
+        rollback["action"] = json!({
+            "tool": "hook",
+            "action": "install_hwbp",
+            "args": args,
+        });
+        rollback["detail"] = json!("previous debug-register state was captured, but install_hwbp can only restore the address and condition, not every DR7 flag exactly");
+    }
+
+    rollback
+}
+
+fn hwbp_remove_rollback(tid: u32, register: usize, previous_dr: u64, previous_dr7: u64) -> Value {
+    let previous_local_enabled = hwbp_local_enabled(previous_dr7, register);
+    let previous_global_enabled = hwbp_global_enabled(previous_dr7, register);
+    let previous_control_bits = hwbp_control_bits(previous_dr7, register);
+    let previous_condition = hwbp_condition_from_control(previous_control_bits);
+
+    let mut rollback = json!({
+        "available": false,
+        "strategy": "noop_no_previous_breakpoint",
+        "captured_fields": [
+            "tid",
+            "dr_index",
+            "previous_dr",
+            "previous_dr7",
+            "previous_control_bits",
+            "previous_local_enabled",
+            "previous_global_enabled"
+        ],
+        "previous_dr": crate::memory::rollback::format_address(previous_dr),
+        "previous_dr7": format!("0x{:016X}", previous_dr7),
+        "previous_control_bits": previous_control_bits,
+        "previous_local_enabled": previous_local_enabled,
+        "previous_global_enabled": previous_global_enabled,
+        "action": Value::Null,
+        "detail": "no active hardware breakpoint was captured before removal",
+    });
+
+    if previous_dr != 0
+        || previous_local_enabled
+        || previous_global_enabled
+        || previous_control_bits != 0
+    {
+        let args = hwbp_install_args(tid, register, previous_dr, previous_condition);
+        rollback["available"] = json!("partial");
+        rollback["strategy"] = json!("restore_previous_hardware_breakpoint");
+        rollback["reason"] = json!("debug_register_restore_is_partial");
+        rollback["args"] = args.clone();
+        rollback["action"] = json!({
+            "tool": "hook",
+            "action": "install_hwbp",
+            "args": args,
+        });
+        rollback["detail"] = json!("previous debug-register state was captured, but install_hwbp can only restore the address and condition, not every DR7 flag exactly");
+    }
+
+    rollback
+}
 
 /// Set hardware breakpoint on a function using debug registers
 /// DR0-DR3 can each hold one address. DR7 controls enable/condition/length.
@@ -71,11 +214,14 @@ pub fn hwbp_hook(args: &Value) -> Result<Value, MemoricError> {
         let dr_base: usize = 0x350;
         let dr7_offset: usize = 0x378;
 
+        let previous_dr = *(ctx_ptr.add(dr_base + register * 8) as *mut u64);
+        let previous_dr7 = *(ctx_ptr.add(dr7_offset) as *mut u64);
+
         // Set DRn to target address
         *(ctx_ptr.add(dr_base + register * 8) as *mut u64) = address as u64;
 
         // Configure DR7
-        let mut dr7 = *(ctx_ptr.add(dr7_offset) as *mut u64);
+        let mut dr7 = previous_dr7;
 
         // Enable local breakpoint for DRn: set bit (register * 2)
         dr7 |= 1u64 << (register * 2);
@@ -109,6 +255,10 @@ pub fn hwbp_hook(args: &Value) -> Result<Value, MemoricError> {
                 _ => "unknown",
             },
             "dr7": format!("0x{:016X}", dr7),
+            "previous_dr": crate::memory::rollback::format_address(previous_dr),
+            "previous_dr7": format!("0x{:016X}", previous_dr7),
+            "rollback": hwbp_install_rollback(tid, register, previous_dr, previous_dr7),
+            "provenance": provenance_json(args),
             "message": format!("Hardware breakpoint set on DR{} — no code patching, invisible to integrity checks", register)
         }))
     }
@@ -125,7 +275,11 @@ pub fn hwbp_unhook(args: &Value) -> Result<Value, MemoricError> {
         .get("tid")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| MemoricError::WindowsApi("Missing tid".to_string()))? as u32;
-    let register = args.get("register").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    let register = args
+        .get("dr_index")
+        .and_then(|v| v.as_u64())
+        .or_else(|| args.get("register").and_then(|v| v.as_u64()))
+        .unwrap_or(0) as usize;
 
     if register > 3 {
         return Err(MemoricError::WindowsApi("register must be 0-3".to_string()));
@@ -152,11 +306,14 @@ pub fn hwbp_unhook(args: &Value) -> Result<Value, MemoricError> {
         let dr_base: usize = 0x350;
         let dr7_offset: usize = 0x378;
 
+        let previous_dr = *(ctx_ptr.add(dr_base + register * 8) as *mut u64);
+        let previous_dr7 = *(ctx_ptr.add(dr7_offset) as *mut u64);
+
         // Clear DRn
         *(ctx_ptr.add(dr_base + register * 8) as *mut u64) = 0;
 
         // Disable in DR7
-        let mut dr7 = *(ctx_ptr.add(dr7_offset) as *mut u64);
+        let mut dr7 = previous_dr7;
         dr7 &= !(1u64 << (register * 2)); // disable local enable
         dr7 &= !(0xFu64 << (16 + register * 4)); // clear condition/length
         *(ctx_ptr.add(dr7_offset) as *mut u64) = dr7;
@@ -173,6 +330,11 @@ pub fn hwbp_unhook(args: &Value) -> Result<Value, MemoricError> {
             "technique": "hwbp_unhook",
             "tid": tid,
             "register": format!("DR{}", register),
+            "previous_dr": crate::memory::rollback::format_address(previous_dr),
+            "previous_dr7": format!("0x{:016X}", previous_dr7),
+            "dr7": format!("0x{:016X}", dr7),
+            "rollback": hwbp_remove_rollback(tid, register, previous_dr, previous_dr7),
+            "provenance": provenance_json(args),
             "message": format!("Hardware breakpoint DR{} removed from thread {}", register, tid)
         }))
     }
@@ -213,7 +375,11 @@ pub fn hwbp_syscall_hook(args: &Value) -> Result<Value, MemoricError> {
             "tid": tid,
             "address": target_addr,
             "register": 0,
-            "condition": 0  // execution breakpoint
+            "condition": 0,  // execution breakpoint
+            "request_id": args.get("request_id").cloned().unwrap_or(Value::Null),
+            "task_id": args.get("task_id").cloned().unwrap_or(Value::Null),
+            "chain_id": args.get("chain_id").cloned().unwrap_or(Value::Null),
+            "purpose": args.get("purpose").cloned().unwrap_or(Value::Null),
         });
 
         let result = hwbp_hook(&hook_args)?;
@@ -225,7 +391,72 @@ pub fn hwbp_syscall_hook(args: &Value) -> Result<Value, MemoricError> {
             "function_address": format!("0x{:016X}", target_addr),
             "redirect_address": redirect_address.map(|a| format!("0x{:016X}", a)),
             "breakpoint_set": result,
+            "rollback": result.get("rollback").cloned().unwrap_or(Value::Null),
+            "provenance": provenance_json(args),
             "message": format!("HWBP execution breakpoint set on {}. Combine with VEH for full interception.", function_name)
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn install_rollback_removes_new_hwbp_when_register_was_empty() {
+        let rollback = hwbp_install_rollback(77, 2, 0, 0);
+
+        assert_eq!(rollback["available"], true);
+        assert_eq!(rollback["strategy"], "remove_hardware_breakpoint");
+        assert_eq!(rollback["action"]["tool"], "hook");
+        assert_eq!(rollback["action"]["action"], "remove_hwbp");
+        assert_eq!(rollback["action"]["args"]["tid"], 77);
+        assert_eq!(rollback["action"]["args"]["dr_index"], 2);
+    }
+
+    #[test]
+    fn install_rollback_reports_partial_restore_when_register_was_configured() {
+        let previous_dr7 = 1u64 << 0 | 3u64 << 16;
+        let rollback = hwbp_install_rollback(77, 0, 0x1234, previous_dr7);
+
+        assert_eq!(rollback["available"], "partial");
+        assert_eq!(rollback["strategy"], "restore_previous_hardware_breakpoint");
+        assert_eq!(rollback["previous_local_enabled"], true);
+        assert_eq!(rollback["action"]["action"], "install_hwbp");
+        assert_eq!(
+            rollback["action"]["args"]["target_address"],
+            "0x0000000000001234"
+        );
+        assert_eq!(rollback["action"]["args"]["condition"], 3);
+    }
+
+    #[test]
+    fn remove_rollback_reinstalls_previous_hwbp_partially() {
+        let previous_dr7 = 1u64 << 2 | 1u64 << 20;
+        let rollback = hwbp_remove_rollback(88, 1, 0x4567, previous_dr7);
+
+        assert_eq!(rollback["available"], "partial");
+        assert_eq!(rollback["strategy"], "restore_previous_hardware_breakpoint");
+        assert_eq!(rollback["action"]["tool"], "hook");
+        assert_eq!(rollback["action"]["action"], "install_hwbp");
+        assert_eq!(rollback["action"]["args"]["dr_index"], 1);
+        assert_eq!(rollback["action"]["args"]["condition"], 1);
+    }
+
+    #[test]
+    fn hwbp_provenance_carries_request_task_chain_and_purpose() {
+        let provenance = provenance_json(&json!({
+            "request_id": "req-hwbp",
+            "task_id": "task-hwbp",
+            "chain_id": "chain-hwbp",
+            "purpose": "test hwbp provenance"
+        }));
+
+        assert_eq!(provenance["correlation_id"], "req-hwbp");
+        assert_eq!(provenance["request_id"], "req-hwbp");
+        assert_eq!(provenance["task_id"], "task-hwbp");
+        assert_eq!(provenance["chain_id"], "chain-hwbp");
+        assert_eq!(provenance["purpose"], "test hwbp provenance");
     }
 }
