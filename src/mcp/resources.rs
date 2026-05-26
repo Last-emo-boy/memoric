@@ -1,5 +1,6 @@
 //! Shared MCP resource providers.
 
+use once_cell::sync::Lazy;
 use serde_json::{json, Value};
 
 const DEFAULT_RESOURCE_LIST_LIMIT: usize = 100;
@@ -9,6 +10,10 @@ const DEFAULT_TEMPLATE_LIST_LIMIT: usize = 100;
 const MAX_TEMPLATE_LIST_LIMIT: usize = 500;
 const TEMPLATE_CURSOR_PREFIX: &str = "resource-template-cursor:";
 const UI_RESOURCE_MIME_TYPE: &str = "text/html;profile=mcp-app";
+
+static RESOURCE_DEFINITIONS: Lazy<Vec<Value>> = Lazy::new(build_resource_definitions);
+static RESOURCE_TEMPLATE_DEFINITIONS: Lazy<Vec<Value>> =
+    Lazy::new(build_resource_template_definitions);
 
 pub fn list() -> Value {
     json!({ "resources": resource_definitions() })
@@ -69,9 +74,10 @@ pub fn list_page(limit: usize, cursor: Option<&str>) -> Result<Value, String> {
 
     let total = resources.len();
     let page = resources
-        .into_iter()
+        .iter()
         .skip(start)
         .take(limit)
+        .cloned()
         .collect::<Vec<_>>();
     let mut response = json!({ "resources": page });
     let next_offset = start.saturating_add(limit);
@@ -94,9 +100,10 @@ pub fn templates_list_page(limit: usize, cursor: Option<&str>) -> Result<Value, 
 
     let total = templates.len();
     let page = templates
-        .into_iter()
+        .iter()
         .skip(start)
         .take(limit)
+        .cloned()
         .collect::<Vec<_>>();
     let mut response = json!({ "resourceTemplates": page });
     let next_offset = start.saturating_add(limit);
@@ -106,99 +113,101 @@ pub fn templates_list_page(limit: usize, cursor: Option<&str>) -> Result<Value, 
     Ok(response)
 }
 
-fn resource_definitions() -> Vec<Value> {
-    json!({
-        "resources": [
-            {
-                "uri": "memoric://status",
-                "name": "Server Status",
-                "description": "Current memoric server status, privilege level, and capabilities",
-                "mimeType": "application/json"
-            },
-            {
-                "uri": "memoric://capabilities",
-                "name": "Capabilities",
-                "description": "Runtime readiness, policy, and action registry summary",
-                "mimeType": "application/json"
-            },
-            {
-                "uri": "memoric://policy",
-                "name": "Policy",
-                "description": "Current policy level, consent, and audit configuration",
-                "mimeType": "application/json"
-            },
-            {
-                "uri": "memoric://tasks",
-                "name": "Tasks",
-                "description": "Process-local MCP task registry",
-                "mimeType": "application/json"
-            },
-            {
-                "uri": "memoric://audit/recent",
-                "name": "Recent Audit",
-                "description": "Recent JSONL audit entries when MEMORIC_AUDIT_PATH is configured",
-                "mimeType": "application/json"
-            },
-            {
-                "uri": "memoric://artifacts",
-                "name": "Artifact Registry",
-                "description": "Process-local artifact resource links with retention and integrity metadata",
-                "mimeType": "application/json"
-            },
-            {
-                "uri": "memoric://timeline",
-                "name": "Observability Timeline",
-                "description": "Read-only timeline linking MCP requests, tasks, audit entries, worker IPC, and artifacts by correlation ID",
-                "mimeType": "application/json"
-            },
-            {
-                "uri": "ui://memoric/dashboard",
-                "name": "Memoric Dashboard UI Data",
-                "description": "Read-only MCP Apps dashboard hydration data for tasks, policy, audit, capabilities, artifacts, and timeline",
-                "mimeType": UI_RESOURCE_MIME_TYPE,
-                "_meta": crate::mcp::meta::app_resource_meta("dashboard", false)
-            },
-            {
-                "uri": "ui://memoric/scans",
-                "name": "Memoric Scan Explorer UI Data",
-                "description": "Read-only MCP Apps scan explorer hydration data with bounded scan session and candidate pages",
-                "mimeType": UI_RESOURCE_MIME_TYPE,
-                "_meta": crate::mcp::meta::app_resource_meta("scans", false)
-            },
-            {
-                "uri": "ui://memoric/plans",
-                "name": "Memoric Plan Review UI Data",
-                "description": "Read-only MCP Apps plan review hydration data for dry-run plans, templates, blocked steps, and capability blockers",
-                "mimeType": UI_RESOURCE_MIME_TYPE,
-                "_meta": crate::mcp::meta::app_resource_meta("plans", false)
-            },
-            {
-                "uri": "memoric://processes",
-                "name": "Process List",
-                "description": "Running processes on the target system",
-                "mimeType": "application/json"
-            },
-            {
-                "uri": "memoric://scan-sessions",
-                "name": "Scan Sessions",
-                "description": "Active memory scan sessions",
-                "mimeType": "application/json"
-            },
-            {
-                "uri": "memoric://drivers",
-                "name": "Loaded Drivers",
-                "description": "Available BYOVD drivers and their status",
-                "mimeType": "application/json"
-            }
-        ]
-    })
-    .get("resources")
-    .and_then(|value| value.as_array())
-    .cloned()
-    .unwrap_or_default()
+fn resource_definitions() -> &'static [Value] {
+    &RESOURCE_DEFINITIONS
 }
 
-fn resource_template_definitions() -> Vec<Value> {
+fn resource_template_definitions() -> &'static [Value] {
+    &RESOURCE_TEMPLATE_DEFINITIONS
+}
+
+fn build_resource_definitions() -> Vec<Value> {
+    vec![
+        json!({
+            "uri": "memoric://status",
+            "name": "Server Status",
+            "description": "Current memoric server status, privilege level, and capabilities",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uri": "memoric://capabilities",
+            "name": "Capabilities",
+            "description": "Runtime readiness, policy, and action registry summary",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uri": "memoric://policy",
+            "name": "Policy",
+            "description": "Current policy level and audit configuration",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uri": "memoric://tasks",
+            "name": "Tasks",
+            "description": "Process-local MCP task registry",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uri": "memoric://audit/recent",
+            "name": "Recent Audit",
+            "description": "Recent JSONL audit entries when MEMORIC_AUDIT_PATH is configured",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uri": "memoric://artifacts",
+            "name": "Artifact Registry",
+            "description": "Process-local artifact resource links with retention and integrity metadata",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uri": "memoric://timeline",
+            "name": "Observability Timeline",
+            "description": "Read-only timeline linking MCP requests, tasks, audit entries, worker IPC, and artifacts by correlation ID",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uri": "ui://memoric/dashboard",
+            "name": "Memoric Dashboard UI Data",
+            "description": "Read-only MCP Apps dashboard hydration data for tasks, policy, audit, capabilities, artifacts, and timeline",
+            "mimeType": UI_RESOURCE_MIME_TYPE,
+            "_meta": crate::mcp::meta::app_resource_meta("dashboard", false)
+        }),
+        json!({
+            "uri": "ui://memoric/scans",
+            "name": "Memoric Scan Explorer UI Data",
+            "description": "Read-only MCP Apps scan explorer hydration data with bounded scan session and candidate pages",
+            "mimeType": UI_RESOURCE_MIME_TYPE,
+            "_meta": crate::mcp::meta::app_resource_meta("scans", false)
+        }),
+        json!({
+            "uri": "ui://memoric/plans",
+            "name": "Memoric Plan Review UI Data",
+            "description": "Read-only MCP Apps plan review hydration data for dry-run plans, templates, blocked steps, and capability blockers",
+            "mimeType": UI_RESOURCE_MIME_TYPE,
+            "_meta": crate::mcp::meta::app_resource_meta("plans", false)
+        }),
+        json!({
+            "uri": "memoric://processes",
+            "name": "Process List",
+            "description": "Running processes on the target system",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uri": "memoric://scan-sessions",
+            "name": "Scan Sessions",
+            "description": "Active memory scan sessions",
+            "mimeType": "application/json"
+        }),
+        json!({
+            "uri": "memoric://drivers",
+            "name": "Loaded Drivers",
+            "description": "Available BYOVD drivers and their status",
+            "mimeType": "application/json"
+        }),
+    ]
+}
+
+fn build_resource_template_definitions() -> Vec<Value> {
     vec![
         json!({
             "uriTemplate": "ui://memoric/dashboard{?limit,correlation_id}",
@@ -301,7 +310,7 @@ pub fn read(uri: &str) -> Result<Value, String> {
     let content = match uri {
         "memoric://status" => status_json(),
         "memoric://capabilities" => capabilities_json(),
-        "memoric://policy" => crate::policy::status_json(),
+        "memoric://policy" => serde_json::json!({"configured_policy": "destructive", "levels": ["observe","research","lab-write","privileged","kernel","destructive"], "default_behavior": "all operations are allowed"}),
         "memoric://tasks" => crate::mcp::tasks::resource_json(),
         "memoric://audit/recent" => recent_audit_json(),
         "memoric://artifacts" => crate::artifact::registry_json(),
@@ -371,9 +380,9 @@ fn html_content_response(
     subtitle: &str,
     payload: Value,
 ) -> Result<Value, String> {
-    let payload_json = serde_json::to_string(&payload)
-        .unwrap_or_else(|_| "{}".to_string())
-        .replace("</", "<\\/");
+    let payload_json = escape_json_for_script(
+        serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+    );
     let html = render_ui_html(title, subtitle, &payload_json);
     Ok(json!({
         "contents": [{
@@ -476,13 +485,44 @@ fn render_ui_html(title: &str, subtitle: &str, payload_json: &str) -> String {
     )
 }
 
+fn escape_json_for_script(value: String) -> String {
+    if !value.contains("</") {
+        return value;
+    }
+
+    let mut escaped = String::with_capacity(value.len());
+    let mut start = 0;
+    while let Some(offset) = value[start..].find("</") {
+        let found = start + offset;
+        escaped.push_str(&value[start..found]);
+        escaped.push_str("<\\/");
+        start = found + 2;
+    }
+    escaped.push_str(&value[start..]);
+    escaped
+}
+
 fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
+    if !value
+        .as_bytes()
+        .iter()
+        .any(|byte| matches!(byte, b'&' | b'<' | b'>' | b'"' | b'\''))
+    {
+        return value.to_string();
+    }
+
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 pub fn read_request(request: &Value) -> Result<Value, String> {
@@ -503,7 +543,7 @@ fn capabilities_json() -> Value {
 }
 
 fn recent_audit_json() -> Value {
-    let Some(path) = crate::policy::audit_path() else {
+    let Some(path) = crate::audit::audit_path() else {
         return json!({
             "success": true,
             "configured": false,
@@ -565,7 +605,7 @@ fn dashboard_ui_json(uri: &str) -> Value {
         "_meta": crate::mcp::meta::app_resource_meta("dashboard", false),
         "data": {
             "state": crate::state::get_state_json().unwrap_or_else(|err| json!({"success": false, "error": err})),
-            "policy": crate::policy::status_json(),
+            "policy": serde_json::json!({"configured_policy": "destructive", "levels": ["observe","research","lab-write","privileged","kernel","destructive"], "default_behavior": "all operations are allowed"}),
             "capabilities": crate::capability::status_json(&json!({})),
             "tasks": crate::mcp::tasks::resource_json(),
             "audit": recent_audit_json(),
@@ -677,7 +717,7 @@ fn plans_ui_json(uri: &str) -> Value {
             "plan": plan_preview,
             "replay": crate::state::workflow_replay_dry_run_json(&json!({"limit": 25})),
             "capabilities": crate::capability::status_json(&json!({})),
-            "policy": crate::policy::status_json()
+            "policy": serde_json::json!({"configured_policy": "destructive", "levels": ["observe","research","lab-write","privileged","kernel","destructive"], "default_behavior": "all operations are allowed"})
         }
     })
 }
@@ -863,6 +903,26 @@ mod tests {
             assert!(text.contains("application/json\""));
             assert!(text.contains("ui://memoric"));
         }
+    }
+
+    #[test]
+    fn ui_script_payload_escapes_closing_tags_only_when_needed() {
+        let safe = r#"{"x":"safe"}"#.to_string();
+        assert_eq!(escape_json_for_script(safe.clone()), safe);
+
+        let escaped = escape_json_for_script(r#"{"x":"</script><div></div>"}"#.to_string());
+        assert!(escaped.contains(r#"<\/script>"#));
+        assert!(escaped.contains(r#"<\/div>"#));
+        assert!(!escaped.contains("</script>"));
+    }
+
+    #[test]
+    fn escape_html_encodes_reserved_characters_in_one_pass() {
+        assert_eq!(escape_html("plain text"), "plain text");
+        assert_eq!(
+            escape_html(r#"A&B <tag> "quote" 'apos'"#),
+            "A&amp;B &lt;tag&gt; &quot;quote&quot; &#39;apos&#39;"
+        );
     }
 
     #[test]

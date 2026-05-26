@@ -134,10 +134,6 @@
             "description": "Compatibility flag for task-augmented execution: run eligible read-only or dry-run calls in the process-local MCP task registry for polling/cancellation. MCP clients may prefer params.task.",
             "type": "boolean"
           },
-          "consent_token": {
-            "description": "Explicit consent token for policy-gated state-changing operations",
-            "type": "string"
-          },
           "domain": {
             "description": "Show detailed help for a specific domain",
             "enum": [
@@ -1059,10 +1055,6 @@
               "integer",
               "string"
             ]
-          },
-          "consent_token": {
-            "description": "Explicit consent token for policy-gated state-changing operations",
-            "type": "string"
           },
           "dry_run": {
             "default": false,
@@ -4471,10 +4463,6 @@
               "increased",
               "decreased"
             ],
-            "type": "string"
-          },
-          "consent_token": {
-            "description": "Explicit consent token for policy-gated state-changing operations",
             "type": "string"
           },
           "context_bytes": {
@@ -10751,10 +10739,6 @@
             "description": "Compatibility flag for task-augmented execution: run eligible read-only or dry-run calls in the process-local MCP task registry for polling/cancellation. MCP clients may prefer params.task.",
             "type": "boolean"
           },
-          "consent_token": {
-            "description": "Explicit consent token for policy-gated state-changing operations",
-            "type": "string"
-          },
           "dll_method": {
             "description": "DLL injection method",
             "enum": [
@@ -16151,10 +16135,6 @@
               "string"
             ]
           },
-          "consent_token": {
-            "description": "Explicit consent token for policy-gated state-changing operations",
-            "type": "string"
-          },
           "dry_run": {
             "default": false,
             "description": "Preview a state-changing operation without executing it where supported",
@@ -17779,10 +17759,6 @@
             "default": false,
             "description": "Compatibility flag for task-augmented execution: run eligible read-only or dry-run calls in the process-local MCP task registry for polling/cancellation. MCP clients may prefer params.task.",
             "type": "boolean"
-          },
-          "consent_token": {
-            "description": "Explicit consent token for policy-gated state-changing operations",
-            "type": "string"
           },
           "detour_address": {
             "description": "Registry-described detour_address parameter",
@@ -22626,10 +22602,6 @@
               "scan",
               "cancel_scan"
             ],
-            "type": "string"
-          },
-          "consent_token": {
-            "description": "Explicit consent token for policy-gated state-changing operations",
             "type": "string"
           },
           "delay_ms": {
@@ -36908,10 +36880,6 @@
             "description": "Compatibility flag for task-augmented execution: run eligible read-only or dry-run calls in the process-local MCP task registry for polling/cancellation. MCP clients may prefer params.task.",
             "type": "boolean"
           },
-          "consent_token": {
-            "description": "Explicit consent token for policy-gated state-changing operations",
-            "type": "string"
-          },
           "dry_run": {
             "default": false,
             "description": "Preview a state-changing operation without executing it where supported",
@@ -38523,10 +38491,6 @@
           },
           "command": {
             "description": "Command to execute elevated/as impersonated user",
-            "type": "string"
-          },
-          "consent_token": {
-            "description": "Explicit consent token for policy-gated state-changing operations",
             "type": "string"
           },
           "detail": {
@@ -42581,10 +42545,6 @@
               "target",
               "query"
             ],
-            "type": "string"
-          },
-          "consent_token": {
-            "description": "Explicit consent token for policy-gated state-changing operations",
             "type": "string"
           },
           "cr3": {
@@ -55236,10 +55196,6 @@
             "description": "Stable tool error code for self(action='next_steps')",
             "type": "string"
           },
-          "consent_token": {
-            "description": "Explicit consent token for policy-gated state-changing operations",
-            "type": "string"
-          },
           "correlation_id": {
             "description": "Timeline filter by correlation ID across request, task, audit, worker IPC, and artifacts",
             "type": "string"
@@ -57438,10 +57394,6 @@
             "description": "Persisted chain checkpoint ID for status/resume/cancel/cleanup",
             "type": "string"
           },
-          "consent_token": {
-            "description": "Explicit consent token for policy-gated state-changing operations",
-            "type": "string"
-          },
           "counter_address": {
             "description": "Counter address printed by the benign test target for dry-run write preview only",
             "type": [
@@ -58973,7 +58925,7 @@
       "uri": "memoric://capabilities"
     },
     {
-      "description": "Current policy level, consent, and audit configuration",
+      "description": "Current policy level and audit configuration",
       "mimeType": "application/json",
       "name": "Policy",
       "uri": "memoric://policy"

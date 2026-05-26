@@ -12,9 +12,9 @@
   },
   "capabilities": {
     "experimental": {
-      "progress": true,
-      "structuredContent": true,
-      "tasks": true
+      "progress": {},
+      "structuredContent": {},
+      "tasks": {}
     },
     "logging": {},
     "prompts": {},
@@ -50,7 +50,7 @@
   "toolCatalog": {
     "path": "docs/tool-catalog.json",
     "generatedAt": "deterministic-runtime-tools-list",
-    "sha256": "020bf560dc3e136f2916e23396b93b25fff2ce09b50d0977d83fadac9c82016f",
+    "sha256": "6c7cb6af8301594f537f2218e879cd711e409b096aa80a8194c9f453cf3fd658",
     "toolCount": 12,
     "resourceCount": 13,
     "resourceTemplateCount": 4
@@ -71,7 +71,7 @@
     {
       "uri": "memoric://policy",
       "name": "Policy",
-      "description": "Current policy level, consent, and audit configuration",
+      "description": "Current policy level and audit configuration",
       "mimeType": "application/json"
     },
     {

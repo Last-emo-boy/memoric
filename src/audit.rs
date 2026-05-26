@@ -1,7 +1,87 @@
 //! JSONL audit logging for MCP tool calls.
+//!
+//! Audit entries are built synchronously (observability + redaction) but
+//! the file write is dispatched to a background thread so the response path
+//! is never blocked on disk I/O.
 
 use serde_json::{json, Value};
 use std::io::Write;
+use std::sync::mpsc::{self, SyncSender};
+use std::sync::OnceLock;
+
+#[cfg(test)]
+use std::cell::RefCell;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_AUDIT_PATH: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+static AUDIT_SENDER: OnceLock<SyncSender<String>> = OnceLock::new();
+
+fn audit_sender() -> Option<&'static SyncSender<String>> {
+    let path = audit_path()?;
+    let sender = AUDIT_SENDER.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel::<String>(1024);
+        std::thread::Builder::new()
+            .name("memoric-audit".into())
+            .spawn(move || {
+                for line in rx {
+                    let dir = std::path::Path::new(&path).parent();
+                    if let Some(parent) = dir {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    match std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                    {
+                        Ok(mut file) => {
+                            let _ = writeln!(file, "{}", line);
+                        }
+                        Err(err) => {
+                            tracing::warn!("audit bg write failed {}: {}", path, err);
+                        }
+                    }
+                }
+            })
+            .ok();
+        tx
+    });
+    Some(sender)
+}
+
+pub fn audit_path() -> Option<String> {
+    #[cfg(test)]
+    {
+        if let Some(path) = TEST_AUDIT_PATH.with(|slot| slot.borrow().clone()) {
+            return Some(path);
+        }
+    }
+    std::env::var("MEMORIC_AUDIT_PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_audit_path(path: Option<String>) -> TestAuditPathGuard {
+    let previous = TEST_AUDIT_PATH.with(|slot| slot.replace(path));
+    TestAuditPathGuard { previous }
+}
+
+#[cfg(test)]
+pub(crate) struct TestAuditPathGuard {
+    previous: Option<String>,
+}
+
+#[cfg(test)]
+impl Drop for TestAuditPathGuard {
+    fn drop(&mut self) {
+        TEST_AUDIT_PATH.with(|slot| {
+            *slot.borrow_mut() = self.previous.take();
+        });
+    }
+}
 
 pub fn record_tool_call(
     tool: &str,
@@ -11,10 +91,6 @@ pub fn record_tool_call(
     error: Option<&str>,
     result: Option<&Value>,
 ) {
-    let Some(path) = crate::policy::audit_path() else {
-        return;
-    };
-
     let request_context = crate::mcp::request_context::current_request_context();
     let redaction_profile = crate::redaction::profile_from_args(args);
     let artifacts = result
@@ -57,7 +133,7 @@ pub fn record_tool_call(
         "args": crate::redaction::redact_value(args, redaction_profile),
         "redaction": crate::redaction::metadata(redaction_profile),
         "policy": policy,
-        "policy_profile": crate::policy::policy_profile_audit_json(),
+        "policy_profile": json!({}),
         "result_status": result_status,
         "error": error,
         "artifacts": artifacts,
@@ -66,20 +142,36 @@ pub fn record_tool_call(
     });
     crate::observability::record_audit_entry(&entry);
 
-    if let Some(parent) = std::path::Path::new(&path).parent() {
-        let _ = std::fs::create_dir_all(parent);
+    let line = entry.to_string();
+    #[cfg(test)]
+    if let Some(path) = TEST_AUDIT_PATH.with(|slot| slot.borrow().clone()) {
+        write_audit_line(&path, &line);
+        return;
     }
 
+    // Dispatch file write to background thread — never block the response.
+    if let Some(sender) = audit_sender() {
+        if sender.send(line).is_err() {
+            tracing::debug!("audit channel full, entry dropped");
+        }
+    }
+}
+
+fn write_audit_line(path: &str, line: &str) {
+    let dir = std::path::Path::new(path).parent();
+    if let Some(parent) = dir {
+        let _ = std::fs::create_dir_all(parent);
+    }
     match std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
     {
         Ok(mut file) => {
-            let _ = writeln!(file, "{}", entry);
+            let _ = writeln!(file, "{}", line);
         }
         Err(err) => {
-            tracing::warn!("failed to write audit log {}: {}", path, err);
+            tracing::warn!("audit write failed {}: {}", path, err);
         }
     }
 }
@@ -149,7 +241,7 @@ fn rollback_summary(rollback: &Value, profile: crate::redaction::RedactionProfil
 
 #[cfg(test)]
 mod tests {
-    use super::record_tool_call;
+    use super::{record_tool_call, set_test_audit_path};
     use serde_json::json;
     use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -182,7 +274,7 @@ mod tests {
             crate::state::chrono_now_public().replace([':', '-'], "")
         ));
         let _audit_guard =
-            crate::policy::set_test_audit_path(Some(audit_path.display().to_string()));
+            set_test_audit_path(Some(audit_path.display().to_string()));
 
         let request = json!({
             "jsonrpc": "2.0",
@@ -244,29 +336,8 @@ mod tests {
             std::process::id(),
             fixture_id
         ));
-        let profile_path = std::env::temp_dir().join(format!(
-            "memoric-audit-policy-profile-{}-{}.json",
-            std::process::id(),
-            fixture_id
-        ));
-        let profile = json!({
-            "profile": "audit-lab-policy",
-            "version": 1,
-            "policy": "observe"
-        });
-        let profile_bytes = serde_json::to_vec_pretty(&profile).unwrap();
-        std::fs::write(&profile_path, &profile_bytes).unwrap();
-        std::fs::write(
-            format!("{}.sha256", profile_path.display()),
-            crate::artifact::sha256_bytes(&profile_bytes),
-        )
-        .unwrap();
         let _audit_guard =
-            crate::policy::set_test_audit_path(Some(audit_path.display().to_string()));
-        std::env::set_var(
-            "MEMORIC_POLICY_PROFILE_PATH",
-            profile_path.display().to_string(),
-        );
+            set_test_audit_path(Some(audit_path.display().to_string()));
 
         record_tool_call(
             "self",
@@ -274,7 +345,7 @@ mod tests {
                 "action": "version",
                 "request_id": "audit-policy-profile"
             }),
-            &crate::policy::policy_profile_audit_json(),
+            &json!({}),
             "success",
             None,
             Some(&json!({"message": "ok"})),
@@ -287,14 +358,9 @@ mod tests {
             .find(|line| !line.trim().is_empty())
             .expect("audit entry line");
         let entry: Value = serde_json::from_str(entry_line).expect("audit json");
-        assert_eq!(entry["policy_profile"]["profile"], "audit-lab-policy");
-        assert_eq!(entry["policy_profile"]["status"], "loaded");
-        assert_eq!(entry["policy_profile"]["hash"]["verified"], true);
+        assert_eq!(entry["policy_profile"], json!({}));
 
         let _ = std::fs::remove_file(audit_path);
-        let _ = std::fs::remove_file(profile_path.clone());
-        let _ = std::fs::remove_file(format!("{}.sha256", profile_path.display()));
-        std::env::remove_var("MEMORIC_POLICY_PROFILE_PATH");
     }
 
     #[test]
@@ -307,7 +373,7 @@ mod tests {
             fixture_id
         ));
         let _audit_guard =
-            crate::policy::set_test_audit_path(Some(audit_path.display().to_string()));
+            set_test_audit_path(Some(audit_path.display().to_string()));
 
         record_tool_call(
             "memory",

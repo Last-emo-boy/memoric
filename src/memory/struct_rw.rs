@@ -1,7 +1,6 @@
 //! Structured memory read/write and pointer chain resolution
 
 use crate::error::MemoricError;
-use crate::safe_handle::SafeHandle;
 use crate::util::parse_address;
 use serde_json::{json, Value};
 
@@ -278,18 +277,28 @@ fn serialize_primitive_value(
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|byte| format!("{:02X}", byte))
-        .collect::<Vec<_>>()
-        .join(" ")
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    if bytes.is_empty() {
+        return String::new();
+    }
+
+    let mut output = String::with_capacity(bytes.len().saturating_mul(3).saturating_sub(1));
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if index > 0 {
+            output.push(' ');
+        }
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0F) as usize] as char);
+    }
+    output
 }
 
 /// Read one primitive numeric value with explicit endian and alignment metadata.
 pub fn typed_read(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+        PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
     };
 
     let pid = crate::args::require_pid(args, "pid").map_err(MemoricError::MemoryAccess)?;
@@ -302,16 +311,19 @@ pub fn typed_read(args: &Value) -> Result<Value, MemoricError> {
         .and_then(|value| value.as_bool())
         .unwrap_or(true);
     let alignment = validate_alignment(address, primitive, allow_unaligned)?;
+    let _handle_cache_guard = crate::handle_cache::ensure_request();
 
     unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid)
+        let handle = crate::handle_cache::get_or_open(
+            pid,
+            (PROCESS_QUERY_INFORMATION | PROCESS_VM_READ).0,
+        )
             .map_err(|e| MemoricError::WindowsApi(format!("OpenProcess failed: {}", e)))?;
-        let handle = SafeHandle::new(handle);
 
         let mut buffer = vec![0u8; primitive.size()];
         let mut bytes_read = 0usize;
         ReadProcessMemory(
-            *handle,
+            handle,
             address as *const _,
             buffer.as_mut_ptr() as *mut _,
             buffer.len(),
@@ -346,7 +358,7 @@ pub fn typed_read(args: &Value) -> Result<Value, MemoricError> {
 pub fn typed_write(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_WRITE,
+        PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_WRITE,
     };
 
     let pid = crate::args::require_pid(args, "pid").map_err(MemoricError::MemoryAccess)?;
@@ -363,19 +375,18 @@ pub fn typed_write(args: &Value) -> Result<Value, MemoricError> {
         .unwrap_or(true);
     let alignment = validate_alignment(address, primitive, allow_unaligned)?;
     let bytes = serialize_primitive_value(value, primitive, endian)?;
+    let _handle_cache_guard = crate::handle_cache::ensure_request();
 
     unsafe {
-        let handle = OpenProcess(
-            PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION,
-            false,
+        let handle = crate::handle_cache::get_or_open(
             pid,
+            (PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION).0,
         )
         .map_err(|e| MemoricError::WindowsApi(format!("OpenProcess failed: {}", e)))?;
-        let handle = SafeHandle::new(handle);
 
         let mut bytes_written = 0usize;
         WriteProcessMemory(
-            *handle,
+            handle,
             address as *const _,
             bytes.as_ptr() as *const _,
             bytes.len(),
@@ -404,7 +415,7 @@ pub fn typed_write(args: &Value) -> Result<Value, MemoricError> {
 pub fn read_struct(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+        PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
     };
 
     let pid = args
@@ -460,21 +471,20 @@ pub fn read_struct(args: &Value) -> Result<Value, MemoricError> {
     );
 
     let _ = crate::privilege::enable_debug_privilege(&serde_json::json!({}));
+    let _handle_cache_guard = crate::handle_cache::ensure_request();
 
     unsafe {
-        let handle = OpenProcess(
-            PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
-            false,
+        let handle = crate::handle_cache::get_or_open(
             pid as u32,
+            (PROCESS_QUERY_INFORMATION | PROCESS_VM_READ).0,
         )
         .map_err(|e| MemoricError::WindowsApi(format!("OpenProcess failed: {}", e)))?;
-        let handle = SafeHandle::new(handle);
 
         let mut buffer = vec![0u8; max_end];
         let mut bytes_read = 0usize;
 
         ReadProcessMemory(
-            *handle,
+            handle,
             address as *const _,
             buffer.as_mut_ptr() as *mut _,
             max_end,
@@ -490,11 +500,7 @@ pub fn read_struct(args: &Value) -> Result<Value, MemoricError> {
             result_fields.insert(name.clone(), val);
         }
 
-        let raw_hex: String = buffer[..bytes_read]
-            .iter()
-            .map(|b| format!("{:02X}", b))
-            .collect::<Vec<_>>()
-            .join(" ");
+        let raw_hex = hex_bytes(&buffer[..bytes_read]);
 
         Ok(serde_json::json!({
             "success": true,
@@ -511,7 +517,7 @@ pub fn read_struct(args: &Value) -> Result<Value, MemoricError> {
 pub fn write_struct(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_WRITE,
+        PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_WRITE,
     };
 
     let pid = args
@@ -555,15 +561,14 @@ pub fn write_struct(args: &Value) -> Result<Value, MemoricError> {
     );
 
     let _ = crate::privilege::enable_debug_privilege(&serde_json::json!({}));
+    let _handle_cache_guard = crate::handle_cache::ensure_request();
 
     unsafe {
-        let handle = OpenProcess(
-            PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION,
-            false,
+        let handle = crate::handle_cache::get_or_open(
             pid as u32,
+            (PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION).0,
         )
         .map_err(|e| MemoricError::WindowsApi(format!("OpenProcess failed: {}", e)))?;
-        let handle = SafeHandle::new(handle);
 
         // Write each field individually to avoid overwriting gaps
         let mut total_written = 0usize;
@@ -571,7 +576,7 @@ pub fn write_struct(args: &Value) -> Result<Value, MemoricError> {
             let write_addr = address + *offset as u64;
             let mut bytes_written = 0usize;
             WriteProcessMemory(
-                *handle,
+                handle,
                 write_addr as *const _,
                 bytes.as_ptr() as *const _,
                 bytes.len(),
@@ -600,7 +605,7 @@ pub fn write_struct(args: &Value) -> Result<Value, MemoricError> {
 pub fn pointer_chain_resolve(args: &Value) -> Result<Value, MemoricError> {
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+        PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
     };
 
     let pid = args
@@ -626,15 +631,14 @@ pub fn pointer_chain_resolve(args: &Value) -> Result<Value, MemoricError> {
     );
 
     let _ = crate::privilege::enable_debug_privilege(&serde_json::json!({}));
+    let _handle_cache_guard = crate::handle_cache::ensure_request();
 
     unsafe {
-        let handle = OpenProcess(
-            PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
-            false,
+        let handle = crate::handle_cache::get_or_open(
             pid as u32,
+            (PROCESS_QUERY_INFORMATION | PROCESS_VM_READ).0,
         )
         .map_err(|e| MemoricError::WindowsApi(format!("OpenProcess failed: {}", e)))?;
-        let handle = SafeHandle::new(handle);
 
         let mut current_addr = base;
         let mut intermediates: Vec<String> = vec![format!("0x{:016X}", current_addr)];
@@ -645,7 +649,7 @@ pub fn pointer_chain_resolve(args: &Value) -> Result<Value, MemoricError> {
             let mut bytes_read = 0usize;
 
             ReadProcessMemory(
-                *handle,
+                handle,
                 current_addr as *const _,
                 ptr_buf.as_mut_ptr() as *mut _,
                 8,
@@ -668,7 +672,7 @@ pub fn pointer_chain_resolve(args: &Value) -> Result<Value, MemoricError> {
         let mut final_buf = [0u8; 8];
         let mut final_read = 0usize;
         let final_read_ok = ReadProcessMemory(
-            *handle,
+            handle,
             current_addr as *const _,
             final_buf.as_mut_ptr() as *mut _,
             8,
@@ -689,9 +693,7 @@ pub fn pointer_chain_resolve(args: &Value) -> Result<Value, MemoricError> {
                     "u64": u64::from_ne_bytes(final_buf),
                     "i32": i32::from_ne_bytes([final_buf[0], final_buf[1], final_buf[2], final_buf[3]]),
                     "f32": f32::from_ne_bytes([final_buf[0], final_buf[1], final_buf[2], final_buf[3]]),
-                    "hex": format!("{:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
-                        final_buf[0], final_buf[1], final_buf[2], final_buf[3],
-                        final_buf[4], final_buf[5], final_buf[6], final_buf[7])
+                    "hex": hex_bytes(&final_buf)
                 })
             } else {
                 serde_json::json!(null)
@@ -793,12 +795,7 @@ fn parse_field_value(buffer: &[u8], offset: usize, ftype: &str) -> Value {
         }
         s if s.starts_with("bytes:") => {
             let len = s[6..].parse::<usize>().unwrap_or(16).min(remaining.len());
-            let hex: String = remaining[..len]
-                .iter()
-                .map(|b| format!("{:02X}", b))
-                .collect::<Vec<_>>()
-                .join(" ");
-            serde_json::json!(hex)
+            serde_json::json!(hex_bytes(&remaining[..len]))
         }
         _ => Value::Null,
     }
@@ -876,11 +873,7 @@ fn serialize_field_value(value: &Value, ftype: &str) -> Result<Vec<u8>, MemoricE
                     .filter_map(|v| v.as_u64().map(|b| b as u8))
                     .collect())
             } else if let Some(hex) = value.as_str() {
-                // Parse hex string
-                Ok(hex
-                    .split_whitespace()
-                    .filter_map(|s| u8::from_str_radix(s, 16).ok())
-                    .collect())
+                Ok(parse_loose_hex_tokens(hex))
             } else {
                 Err(MemoricError::MemoryAccess(
                     "Expected byte array or hex string".to_string(),
@@ -892,6 +885,32 @@ fn serialize_field_value(value: &Value, ftype: &str) -> Result<Vec<u8>, MemoricE
             ftype
         ))),
     }
+}
+
+fn parse_loose_hex_tokens(value: &str) -> Vec<u8> {
+    value
+        .split_whitespace()
+        .filter_map(parse_loose_hex_byte)
+        .collect()
+}
+
+fn parse_loose_hex_byte(token: &str) -> Option<u8> {
+    let mut value = 0u16;
+    let mut saw_digit = false;
+    for byte in token.bytes() {
+        let nibble = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => return None,
+        };
+        saw_digit = true;
+        value = value.checked_mul(16)?.checked_add(nibble as u16)?;
+        if value > u8::MAX as u16 {
+            return None;
+        }
+    }
+    saw_digit.then_some(value as u8)
 }
 
 #[cfg(test)]
@@ -1081,5 +1100,15 @@ mod tests {
         }))
         .expect_err("unsupported type should fail");
         assert!(err.to_string().contains("Unsupported primitive type"));
+    }
+
+    #[test]
+    fn loose_hex_token_parser_preserves_bytes_field_compatibility() {
+        assert_eq!(
+            parse_loose_hex_tokens("A 0f FF gg 100 0001"),
+            vec![0x0A, 0x0F, 0xFF, 0x01]
+        );
+        assert_eq!(parse_loose_hex_tokens("DEADBEEF"), Vec::<u8>::new());
+        assert_eq!(parse_loose_hex_tokens(""), Vec::<u8>::new());
     }
 }

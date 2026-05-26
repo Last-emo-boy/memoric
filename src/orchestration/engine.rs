@@ -1096,7 +1096,7 @@ pub fn plan_chain(args: &Value) -> Result<Value, MemoricError> {
         "blocked_steps": blocked_steps,
         "dag": dag,
         "policy_planner": {
-            "configured_policy": crate::policy::configured_level().as_str(),
+            "configured_policy": "destructive",
             "capability_summary": planner_capability_summary(&capability_matrix),
             "selection_rule": "effective_plan includes only DAG nodes allowed by policy/capabilities whose required dependencies are satisfied; static validation errors are reported separately",
         },
@@ -2560,14 +2560,13 @@ fn planner_decision(
 ) -> Value {
     let traits = crate::mcp::action_registry::classify_action(tool, action);
     let decision_args = planner_policy_args(action, step_args);
-    let policy = crate::policy::evaluate_tool_call(tool, &decision_args);
     let capability_blockers =
         capability_blockers(tool, action, &decision_args, traits, capability_matrix);
-    let include = policy.allowed && capability_blockers.is_empty();
+    let include = capability_blockers.is_empty();
     let skip_reason = if include {
         "included".to_string()
     } else {
-        planner_skip_reason(&policy, &capability_blockers)
+        planner_skip_reason(&capability_blockers)
     };
 
     json!({
@@ -2579,13 +2578,13 @@ fn planner_decision(
         "requires_target": traits.requires_target,
         "risk": traits.risk.as_str(),
         "required_policy": traits.required_policy.as_str(),
-        "policy": policy.as_json(),
+        "policy": json!({"allowed": true, "reason": "always_allowed", "configured_level": "destructive"}),
         "capabilities": {
             "blockers": capability_blockers,
             "summary": planner_capability_summary(capability_matrix),
         },
         "selection": planner_technique_selection(tool, action, &decision_args, traits, capability_matrix),
-        "alternatives": planner_alternatives(tool, action, &decision_args, traits, &policy),
+        "alternatives": planner_alternatives(tool, action, &decision_args, traits),
     })
 }
 
@@ -2664,13 +2663,9 @@ fn capability_blockers(
 }
 
 fn planner_skip_reason(
-    policy: &crate::policy::PolicyDecision,
     capability_blockers: &[Value],
 ) -> String {
     let mut reasons = Vec::new();
-    if !policy.allowed {
-        reasons.push(policy.reason.clone());
-    }
     reasons.extend(
         capability_blockers
             .iter()
@@ -3564,22 +3559,8 @@ fn planner_alternatives(
     action: &str,
     args: &Value,
     traits: crate::mcp::action_registry::ActionTraits,
-    policy: &crate::policy::PolicyDecision,
 ) -> Vec<Value> {
     let mut alternatives = Vec::new();
-
-    if !policy.allowed && traits.state_changing {
-        let mut preview_args = args.clone();
-        if let Some(obj) = preview_args.as_object_mut() {
-            obj.insert("dry_run".to_string(), json!(true));
-        }
-        alternatives.push(json!({
-            "tool": tool,
-            "action": action,
-            "args": preview_args,
-            "reason": "Preview the state-changing step without executing it."
-        }));
-    }
 
     if traits.kernel {
         alternatives.push(json!({
@@ -3713,39 +3694,9 @@ fn static_plan_warnings(tool: &str, action: &str, args: &Value) -> Vec<String> {
 }
 
 fn scan_running_processes() -> Result<Vec<(String, u32)>, MemoricError> {
-    use windows::Win32::System::Diagnostics::ToolHelp::*;
-
-    let mut result = Vec::new();
-
-    unsafe {
-        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-            .map_err(|e| MemoricError::WindowsApi(format!("CreateToolhelp32Snapshot: {}", e)))?;
-
-        let mut entry = PROCESSENTRY32W {
-            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-            ..Default::default()
-        };
-
-        if Process32FirstW(snap, &mut entry).is_ok() {
-            loop {
-                let name_end = entry
-                    .szExeFile
-                    .iter()
-                    .position(|&c| c == 0)
-                    .unwrap_or(entry.szExeFile.len());
-                let name = String::from_utf16_lossy(&entry.szExeFile[..name_end]);
-                result.push((name, entry.th32ProcessID));
-
-                if Process32NextW(snap, &mut entry).is_err() {
-                    break;
-                }
-            }
-        }
-
-        let _ = windows::Win32::Foundation::CloseHandle(snap);
-    }
-
-    Ok(result)
+    crate::info::process_walk::walk_processes(|pid, _, name| {
+        Some((name.to_string(), pid))
+    })
 }
 
 fn scan_security_services() -> Result<Vec<String>, MemoricError> {
@@ -3918,23 +3869,12 @@ fn check_sysmon_present() -> bool {
 }
 
 fn check_etw_ti_enabled() -> bool {
-    // Check if EtwThreatIntProvRegHandle is non-null
     // This is a heuristic — if ntdll!EtwEventWrite is hooked, ETW-TI is likely active
     unsafe {
-        use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
-        let ntdll = match GetModuleHandleA(windows::core::PCSTR(b"ntdll.dll\0".as_ptr())) {
-            Ok(h) => h,
-            Err(_) => return false,
-        };
-
-        let func = GetProcAddress(ntdll, windows::core::PCSTR(b"EtwEventWrite\0".as_ptr()));
-        if let Some(ptr) = func {
-            let bytes = std::slice::from_raw_parts(ptr as *const u8, 4);
-            // If first bytes are a JMP (0xFF 0x25 or 0xE9), it's hooked → ETW monitoring active
-            bytes[0] == 0xFF || bytes[0] == 0xE9
-        } else {
-            false
-        }
+        let ptr = crate::ntdll::etw_event_write_addr();
+        let bytes = std::slice::from_raw_parts(ptr, 4);
+        // If first bytes are a JMP (0xFF 0x25 or 0xE9), it's hooked → ETW monitoring active
+        bytes[0] == 0xFF || bytes[0] == 0xE9
     }
 }
 
@@ -3995,15 +3935,6 @@ mod tests {
         let previous = std::env::var(key).ok();
         std::env::set_var(key, value);
         EnvRestore { key, previous }
-    }
-
-    fn isolate_policy_env() -> Vec<EnvRestore> {
-        vec![
-            EnvRestore::remove("MEMORIC_POLICY"),
-            EnvRestore::remove("MEMORIC_POLICY_PROFILE_PATH"),
-            EnvRestore::remove("MEMORIC_POLICY_PROFILE_ALLOW_LOCAL_OVERRIDE"),
-            EnvRestore::remove("MEMORIC_POLICY_PROFILE_SIGNATURE_KEY"),
-        ]
     }
 
     fn pagination_plan_steps() -> Value {
@@ -4282,7 +4213,7 @@ mod tests {
     #[test]
     fn plan_chain_outputs_dag_nodes_edges_and_execution_order() {
         let _guard = crate::state::TEST_ENV_LOCK.lock().unwrap();
-        let _env = isolate_policy_env();
+
         let result = plan_chain(&json!({
             "steps": [
                 {"id":"discover", "tool":"target", "action":"ps_list", "args":{"limit": 10}},
@@ -4315,7 +4246,8 @@ mod tests {
     #[test]
     fn plan_chain_skips_explicit_dependents_when_dependency_blocked() {
         let _guard = crate::state::TEST_ENV_LOCK.lock().unwrap();
-        let _env = isolate_policy_env();
+        let _env = set_env("MEMORIC_SIMULATE_UNSUPPORTED_PLATFORM", "1");
+
         let result = plan_chain(&json!({
             "steps": [
                 {"id":"mutate", "tool":"memory", "action":"write", "args":{"pid": 1234, "address": "0x1000", "bytes": [1]}},
@@ -4463,7 +4395,7 @@ mod tests {
     #[test]
     fn plan_chain_paginates_result_sections_with_stable_cursor() {
         let _guard = crate::state::TEST_ENV_LOCK.lock().unwrap();
-        let _env = isolate_policy_env();
+
         let args = json!({
             "steps": pagination_plan_steps(),
             "limit": 1
@@ -4492,7 +4424,7 @@ mod tests {
     #[test]
     fn plan_chain_exports_full_plan_artifact_when_output_path_is_requested() {
         let _guard = crate::state::TEST_ENV_LOCK.lock().unwrap();
-        let _env = isolate_policy_env();
+
         let output_path = std::env::temp_dir().join(format!(
             "memoric-orchestration-plan-artifact-{}.json",
             std::process::id()
@@ -4532,7 +4464,7 @@ mod tests {
     #[test]
     fn plan_chain_rejects_cursor_when_result_snapshot_changes() {
         let _guard = crate::state::TEST_ENV_LOCK.lock().unwrap();
-        let _env = isolate_policy_env();
+
         let first = plan_chain(&json!({
             "steps": pagination_plan_steps(),
             "limit": 1
@@ -4943,7 +4875,7 @@ mod tests {
     #[test]
     fn execute_chain_live_mode_uses_capability_planner_before_dispatch() {
         let _guard = crate::state::TEST_ENV_LOCK.lock().unwrap();
-        let _policy = isolate_policy_env();
+
         let result = execute_chain(&json!({
             "pid": 1234,
             "dry_run": false,
@@ -5140,7 +5072,7 @@ mod tests {
     #[test]
     fn execute_chain_with_checkpoint_skips_completed_steps_without_replaying_live_actions() {
         let _guard = crate::state::TEST_ENV_LOCK.lock().unwrap();
-        let _policy = isolate_policy_env();
+
         let path = std::env::temp_dir().join(format!(
             "memoric-chain-state-{}-execute-resume.json",
             std::process::id()

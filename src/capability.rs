@@ -5,6 +5,7 @@
 //! driver, and target readiness without triggering driver load or privilege
 //! changes.
 
+use once_cell::sync::Lazy;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -20,7 +21,7 @@ pub fn status_json(args: &Value) -> Value {
         "protocol_version": crate::mcp::protocol::PROTOCOL_VERSION,
         "is_admin": matrix["privilege"]["admin"].clone(),
         "pid": std::process::id(),
-        "tools_count": crate::mcp::tools::register_tools().len(),
+        "tools_count": crate::mcp::tools::tool_count(),
         "policy": matrix["policy"].clone(),
         "capabilities": {
             "platform": matrix["platform"].clone(),
@@ -33,19 +34,21 @@ pub fn status_json(args: &Value) -> Value {
 pub fn capabilities_json(args: &Value) -> Value {
     let mut matrix = matrix_json(args);
     if let Some(obj) = matrix.as_object_mut() {
+        let tool_descriptors = crate::mcp::action_registry::tool_descriptors();
         obj.insert(
             "tools".to_string(),
-            json!(crate::mcp::action_registry::tool_names()),
+            json!(tool_descriptors
+                .iter()
+                .map(|descriptor| descriptor.name)
+                .collect::<Vec<_>>()),
         );
         obj.insert(
             "action_counts".to_string(),
-            json!(crate::mcp::action_registry::tool_names()
+            json!(tool_descriptors
                 .iter()
-                .map(|tool| json!({
-                    "tool": tool,
-                    "actions": crate::mcp::action_registry::tool_actions(tool)
-                        .map(|actions| actions.len())
-                        .unwrap_or(0)
+                .map(|descriptor| json!({
+                    "tool": descriptor.name,
+                    "actions": descriptor.actions.len()
                 }))
                 .collect::<Vec<_>>()),
         );
@@ -326,11 +329,36 @@ pub fn matrix_json(args: &Value) -> Value {
         "server": server_json(),
         "platform": platform_json(),
         "privilege": privilege_json(),
-        "policy": crate::policy::status_json(),
+        "policy": policy_status_json(),
         "audit": audit_json(),
         "driver": driver_readiness_json(),
         "target": target_readiness_json(target_pid),
         "generated_at": crate::state::chrono_now_public(),
+    })
+}
+
+fn policy_status_json() -> Value {
+    json!({
+        "configured_policy": "destructive",
+        "levels": ["observe", "research", "lab-write", "privileged", "kernel", "destructive"],
+        "default_behavior": "all operations are allowed",
+        "policy_profile": {
+            "configured": false,
+            "status": "absent",
+            "profile": Value::Null,
+            "hash": {
+                "algorithm": "sha256",
+                "sha256": Value::Null,
+                "verified": false,
+            }
+        },
+        "protected_target_guard": {
+            "override_enabled": false
+        },
+        "target_allowlist": {
+            "configured": false,
+            "entries": []
+        }
     })
 }
 
@@ -402,7 +430,7 @@ const CAPABILITY_DIFF_WATCHES: &[CapabilityDiffWatch] = &[
     CapabilityDiffWatch {
         path: "policy.configured_policy",
         label: "policy",
-        impact: "The active MEMORIC_POLICY controls which actions can execute.",
+        impact: "All actions are allowed; no policy restriction.",
         severity: "high",
     },
     CapabilityDiffWatch {
@@ -532,7 +560,7 @@ fn value_at_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
 fn diagnostics_bundle_payload(args: &Value) -> Value {
     let matrix = matrix_json(&json!({}));
     let safe_matrix = sanitize_diagnostics_value(&matrix);
-    let policy = crate::policy::status_json();
+    let policy = policy_status_json();
     let audit = diagnostics_audit_config_json();
     let task_limit = diagnostics_task_limit(args);
     let task_summaries = diagnostics_task_summaries(task_limit);
@@ -568,7 +596,6 @@ fn diagnostics_bundle_payload(args: &Value) -> Value {
             "target_allowlist": policy["target_allowlist"].clone(),
             "levels": policy["levels"].clone(),
             "default_behavior": policy["default_behavior"].clone(),
-            "consent_token_configured": policy["consent_token_configured"].clone(),
         },
         "audit": audit,
         "gateway_assumptions": {
@@ -611,7 +638,7 @@ fn diagnostics_bundle_payload(args: &Value) -> Value {
 }
 
 fn diagnostics_audit_config_json() -> Value {
-    let audit_path = crate::policy::audit_path();
+    let audit_path = crate::audit::audit_path();
     let path_info = audit_path.as_deref().map(diagnostics_path_info);
     let configured = audit_path.is_some();
     let ok = audit_path
@@ -691,7 +718,15 @@ fn diagnostics_task_limit(args: &Value) -> usize {
     }
 }
 
-fn diagnostics_catalog_hash_json() -> Value {
+static DIAGNOSTICS_CATALOG_HASH_JSON: Lazy<Value> = Lazy::new(build_diagnostics_catalog_hash_json);
+static DIAGNOSTICS_COMPATIBILITY_DOC_HASH_JSON: Lazy<Value> =
+    Lazy::new(|| build_diagnostics_doc_hash_json("docs/compatibility.md"));
+static DIAGNOSTICS_SERVER_MANIFEST_DOC_HASH_JSON: Lazy<Value> =
+    Lazy::new(|| build_diagnostics_doc_hash_json("docs/server-manifest.json"));
+static DIAGNOSTICS_ARCHITECTURE_DOC_HASH_JSON: Lazy<Value> =
+    Lazy::new(|| build_diagnostics_doc_hash_json("docs/architecture.md"));
+
+fn build_diagnostics_catalog_hash_json() -> Value {
     let content = include_bytes!("../docs/tool-catalog.json");
     let parsed = serde_json::from_slice::<Value>(content).unwrap_or(Value::Null);
     json!({
@@ -705,6 +740,20 @@ fn diagnostics_catalog_hash_json() -> Value {
 }
 
 fn diagnostics_doc_hash_json(path: &str) -> Value {
+    match path {
+        "docs/compatibility.md" => return DIAGNOSTICS_COMPATIBILITY_DOC_HASH_JSON.clone(),
+        "docs/server-manifest.json" => return DIAGNOSTICS_SERVER_MANIFEST_DOC_HASH_JSON.clone(),
+        "docs/architecture.md" => return DIAGNOSTICS_ARCHITECTURE_DOC_HASH_JSON.clone(),
+        _ => {}
+    }
+    build_diagnostics_doc_hash_json(path)
+}
+
+fn diagnostics_catalog_hash_json() -> Value {
+    DIAGNOSTICS_CATALOG_HASH_JSON.clone()
+}
+
+fn build_diagnostics_doc_hash_json(path: &str) -> Value {
     let full_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
     match std::fs::read(&full_path) {
         Ok(content) => json!({
@@ -720,11 +769,11 @@ fn diagnostics_doc_hash_json(path: &str) -> Value {
 }
 
 fn diagnostics_hash_json(value: &Value) -> Value {
-    let bytes = serde_json::to_vec(value).unwrap_or_default();
+    let (sha256, bytes) = crate::artifact::json_hash(value);
     json!({
         "algorithm": "sha256",
-        "sha256": crate::artifact::sha256_bytes(&bytes),
-        "bytes": bytes.len(),
+        "sha256": sha256,
+        "bytes": bytes,
     })
 }
 
@@ -760,7 +809,7 @@ fn diagnostics_bundle_warnings(policy: &Value, audit: &Value) -> Vec<Value> {
         }));
     }
     if let Some(path_hash) = audit["path"]["sha256"].as_str() {
-        let is_temp = crate::policy::audit_path()
+        let is_temp = crate::audit::audit_path()
             .as_deref()
             .map(is_non_persistent_path)
             .unwrap_or(false);
@@ -781,7 +830,7 @@ fn diagnostics_bundle_warnings(policy: &Value, audit: &Value) -> Vec<Value> {
         warnings.push(json!({
             "code": "elevated_policy",
             "severity": "high",
-            "message": "Current MEMORIC_POLICY allows state-changing or privileged operations."
+            "message": "State-changing and privileged operations are always allowed."
         }));
     }
     if policy["protected_target_guard"]["override_enabled"]
@@ -915,7 +964,6 @@ fn is_diagnostics_raw_data_key(key: &str) -> bool {
             | "token"
             | "access_token"
             | "refresh_token"
-            | "consent_token"
     )
 }
 
@@ -1061,7 +1109,7 @@ fn next_steps_for_code(code: &str, args: &Value) -> Vec<Value> {
             tool_step(
                 "self",
                 json!({"action": "doctor"}),
-                "Inspect active policy and consent configuration without changing it.",
+                "Inspect active policy configuration without changing it.",
             ),
             method_step(
                 "resources/read",
@@ -1360,14 +1408,17 @@ fn server_json() -> Value {
 
 fn platform_json() -> Value {
     let windows = windows_version_json();
+    let supported = !crate::mcp::platform_gate::unsupported_platform_simulated();
     json!({
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
         "family": std::env::consts::FAMILY,
-        "supported": std::env::consts::OS == "windows",
+        "supported": supported,
         "windows": windows,
-        "message": if std::env::consts::OS == "windows" {
+        "message": if supported {
             "Windows runtime detected"
+        } else if std::env::consts::OS == "windows" {
+            "Windows runtime support is disabled by MEMORIC_SIMULATE_UNSUPPORTED_PLATFORM"
         } else {
             "Only schema, resources, status, and policy-safe calls are expected to work on non-Windows hosts"
         }
@@ -1426,7 +1477,7 @@ fn debug_privilege_json() -> Value {
 }
 
 fn audit_json() -> Value {
-    let path = crate::policy::audit_path();
+    let path = crate::audit::audit_path();
     let configured = path.is_some();
     let ok = path
         .as_deref()
@@ -1479,36 +1530,8 @@ fn windows_version_json() -> Value {
 }
 
 fn code_integrity_json() -> Value {
-    use std::ffi::c_void;
-    use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
-
-    type NtQuerySystemInformationFn =
-        unsafe extern "system" fn(u32, *mut c_void, u32, *mut u32) -> i32;
-
     unsafe {
-        let ntdll = match GetModuleHandleA(windows::core::PCSTR(b"ntdll.dll\0".as_ptr())) {
-            Ok(handle) => handle,
-            Err(err) => {
-                return json!({
-                    "success": false,
-                    "error": format!("ntdll.dll unavailable: {}", err),
-                    "source": "NtQuerySystemInformation(SystemCodeIntegrityInformation)"
-                })
-            }
-        };
-
-        let Some(func) = GetProcAddress(
-            ntdll,
-            windows::core::PCSTR(b"NtQuerySystemInformation\0".as_ptr()),
-        ) else {
-            return json!({
-                "success": false,
-                "error": "NtQuerySystemInformation not found",
-                "source": "NtQuerySystemInformation(SystemCodeIntegrityInformation)"
-            });
-        };
-
-        let nt_query: NtQuerySystemInformationFn = std::mem::transmute(func);
+        let nt_query = crate::ntdll::nt_query_system_information();
 
         #[repr(C)]
         struct CodeIntegrityInfo {
@@ -1523,7 +1546,7 @@ fn code_integrity_json() -> Value {
         let mut ret_len = 0u32;
         let status = nt_query(
             SYSTEM_CODE_INTEGRITY_INFORMATION,
-            &mut ci_info as *mut _ as *mut c_void,
+            &mut ci_info as *mut _ as *mut u8,
             std::mem::size_of::<CodeIntegrityInfo>() as u32,
             &mut ret_len,
         );
@@ -1646,34 +1669,15 @@ fn target_readiness_json(target_pid: Option<u64>) -> Value {
 }
 
 fn process_exists_by_snapshot(pid: u32) -> bool {
-    use windows::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-        TH32CS_SNAPPROCESS,
-    };
-
-    unsafe {
-        let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
-            return false;
-        };
-        let snapshot = crate::safe_handle::SafeHandle::new(snapshot);
-        let mut entry = PROCESSENTRY32W {
-            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-            ..Default::default()
-        };
-
-        if Process32FirstW(*snapshot, &mut entry).is_err() {
-            return false;
+    crate::info::process_walk::walk_processes(|p, _, _| {
+        if p == pid {
+            Some(())
+        } else {
+            None
         }
-
-        loop {
-            if entry.th32ProcessID == pid {
-                return true;
-            }
-            if Process32NextW(*snapshot, &mut entry).is_err() {
-                return false;
-            }
-        }
-    }
+    })
+    .map(|v| !v.is_empty())
+    .unwrap_or(false)
 }
 
 fn parse_u64_arg(value: Option<&Value>) -> Option<u64> {
@@ -1846,7 +1850,7 @@ mod tests {
         baseline["privilege"]["elevated"] =
             json!(!current["privilege"]["elevated"].as_bool().unwrap_or(false));
         baseline["driver"]["wdac"]["hvci_enabled"] = json!(true);
-        baseline["policy"]["configured_policy"] = json!("destructive");
+        baseline["policy"]["configured_policy"] = json!("observe");
 
         let diff = capability_diff_json(&json!({ "baseline": baseline }));
 
@@ -1893,10 +1897,6 @@ mod tests {
     #[test]
     fn doctor_output_contains_policy_profile_identity() {
         let _guard = crate::state::TEST_ENV_LOCK.lock().unwrap();
-        let _policy = EnvRestore::remove("MEMORIC_POLICY");
-        let _profile = EnvRestore::remove("MEMORIC_POLICY_PROFILE_PATH");
-        let _override = EnvRestore::remove("MEMORIC_POLICY_PROFILE_ALLOW_LOCAL_OVERRIDE");
-        let _signature_key = EnvRestore::remove("MEMORIC_POLICY_PROFILE_SIGNATURE_KEY");
 
         let doctor = doctor_json(&json!({}));
         assert_eq!(doctor["policy"]["policy_profile"]["configured"], false);
@@ -1904,6 +1904,56 @@ mod tests {
         assert!(doctor["policy"]["policy_profile"]["hash"]["algorithm"]
             .as_str()
             .is_some());
+    }
+
+    #[test]
+    fn diagnostics_static_hashes_match_dynamic_builders_and_are_clone_safe() {
+        assert_eq!(
+            diagnostics_catalog_hash_json(),
+            build_diagnostics_catalog_hash_json()
+        );
+        for path in [
+            "docs/compatibility.md",
+            "docs/server-manifest.json",
+            "docs/architecture.md",
+        ] {
+            assert_eq!(
+                diagnostics_doc_hash_json(path),
+                build_diagnostics_doc_hash_json(path),
+                "{path} cached hash should match dynamic builder"
+            );
+        }
+
+        let mut catalog = diagnostics_catalog_hash_json();
+        catalog["sha256"] = json!("modified");
+        let mut compatibility = diagnostics_doc_hash_json("docs/compatibility.md");
+        compatibility["sha256"] = json!("modified");
+
+        assert_ne!(diagnostics_catalog_hash_json()["sha256"], json!("modified"));
+        assert_ne!(
+            diagnostics_doc_hash_json("docs/compatibility.md")["sha256"],
+            json!("modified")
+        );
+    }
+
+    #[test]
+    fn diagnostics_hash_json_matches_serialized_bytes_hash() {
+        let value = json!({
+            "policy": {
+                "configured_policy": "observe",
+                "levels": ["observe", "research", "lab-write"]
+            },
+            "audit": {
+                "configured": true,
+                "path": {"basename": "audit.jsonl"}
+            }
+        });
+        let bytes = serde_json::to_vec(&value).expect("serialize diagnostics value");
+        let hash = diagnostics_hash_json(&value);
+
+        assert_eq!(hash["algorithm"], "sha256");
+        assert_eq!(hash["sha256"], crate::artifact::sha256_bytes(&bytes));
+        assert_eq!(hash["bytes"], bytes.len());
     }
 
     #[test]

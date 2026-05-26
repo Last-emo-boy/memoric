@@ -4369,15 +4369,15 @@ mod tests {
     #[test]
     fn state_changing_kernel_action_requires_preflight_before_driver_open() {
         let _guard = crate::state::TEST_ENV_LOCK.lock().unwrap();
-        std::env::remove_var("MEMORIC_POLICY");
         let error = handle_kernel(&json!({
             "action": "driver_patch_kernel",
             "patch_type": "dse"
         }))
-        .expect_err("live kernel mutation should fail closed at preflight under observe policy");
+        .expect_err("live kernel mutation should fail closed at preflight before driver open");
 
         assert!(error.contains("kernel_preflight_failed"));
-        assert!(error.contains("policy_denied"));
+        assert!(error.contains("kernel(action='driver_patch_kernel')"));
+        assert!(!error.contains("failed to ensure memoric.sys"));
     }
 
     #[test]

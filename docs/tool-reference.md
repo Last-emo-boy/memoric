@@ -42,7 +42,7 @@ Generated from the runtime `tools/list`, `resources/list`, and `resources/templa
 |---|---|---|---|
 | `memoric://status` | Server Status | `application/json` | Current memoric server status, privilege level, and capabilities |
 | `memoric://capabilities` | Capabilities | `application/json` | Runtime readiness, policy, and action registry summary |
-| `memoric://policy` | Policy | `application/json` | Current policy level, consent, and audit configuration |
+| `memoric://policy` | Policy | `application/json` | Current policy level and audit configuration |
 | `memoric://tasks` | Tasks | `application/json` | Process-local MCP task registry |
 | `memoric://audit/recent` | Recent Audit | `application/json` | Recent JSONL audit entries when MEMORIC_AUDIT_PATH is configured |
 | `memoric://artifacts` | Artifact Registry | `application/json` | Process-local artifact resource links with retention and integrity metadata |
@@ -67,7 +67,7 @@ Generated from the runtime `tools/list`, `resources/list`, and `resources/templa
 
 CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available capabilities, suggests optimal attack workflows, and shows current session status.
 
-- Property count: `13`
+- Property count: `12`
 - Required fields: `none`
 - Read-only hint: `True`
 - Destructive hint: `False`
@@ -119,7 +119,6 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 | `allow_protected_target` | `boolean` | no | `false` | `` | Explicit override for state-changing operations against protected or critical Windows targets |  |
 | `artifact_retention_secs` | `integer` | no | `900` | `>= 1; <= 86400` | Retention window for process-local artifact resource links emitted by this call; values outside the registry bounds are rejected before dispatch |  |
 | `as_task` | `boolean` | no | `false` | `` | Compatibility flag for task-augmented execution: run eligible read-only or dry-run calls in the process-local MCP task registry for polling/cancellation. MCP clients may prefer params.task. |  |
-| `consent_token` | `string` | no | `` | `` | Explicit consent token for policy-gated state-changing operations |  |
 | `domain` | `string` | no | `` | `` | Show detailed help for a specific domain | target, memory, inject, payload, hook, stealth, detect, privilege, kernel, self, orchestrate, all |
 | `dry_run` | `boolean` | no | `false` | `` | Preview a state-changing operation without executing it where supported |  |
 | `goal` | `string` | no | `` | `` | Describe your objective for workflow suggestions (e.g. 'inject shellcode stealthily') |  |
@@ -134,7 +133,7 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 
 [TARGET] Process/thread/module operations. List/find processes, enumerate threads, list loaded DLLs, suspend/resume threads, get thread context (RIP/RSP/RAX-R15).
 
-- Property count: `31`
+- Property count: `30`
 - Required fields: `action`
 - Read-only hint: `False`
 - Destructive hint: `False`
@@ -226,7 +225,6 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 | `artifact_retention_secs` | `integer` | no | `900` | `>= 1; <= 86400` | Retention window for process-local artifact resource links emitted by this call; values outside the registry bounds are rejected before dispatch |  |
 | `as_task` | `boolean` | no | `false` | `` | Compatibility flag for task-augmented execution: run eligible read-only or dry-run calls in the process-local MCP task registry for polling/cancellation. MCP clients may prefer params.task. |  |
 | `base_address` | `integer \| string` | no | `` | `` | Registry-described address parameter |  |
-| `consent_token` | `string` | no | `` | `` | Explicit consent token for policy-gated state-changing operations |  |
 | `dry_run` | `boolean` | no | `false` | `` | Preview a state-changing operation without executing it where supported |  |
 | `dump_sam` | `boolean` | no | `` | `` | Dump SAM hive (default: true) |  |
 | `dump_security` | `boolean` | no | `` | `` | Dump SECURITY hive (default: true) |  |
@@ -255,7 +253,7 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 
 [MEMORY] Memory read/write/scan/query plus guarded allocation, protection changes, scan sessions, and read-only diagnostics.
 
-- Property count: `72`
+- Property count: `71`
 - Required fields: `action`
 - Read-only hint: `False`
 - Destructive hint: `False`
@@ -350,7 +348,6 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 | `bytes` | `array \| string` | no | `` | `` | Bytes to write (for write) |  |
 | `case_insensitive` | `boolean` | no | `true` | `` | Case-insensitive matching for scan_mode='string' |  |
 | `change` | `string` | no | `` | `` | Change filter for legacy changed scans | changed, unchanged, increased, decreased |
-| `consent_token` | `string` | no | `` | `` | Explicit consent token for policy-gated state-changing operations |  |
 | `context_bytes` | `string` | no | `` | `<= 4096` | Number of surrounding bytes returned for pattern scan matches |  |
 | `cursor` | `string` | no | `` | `` | Opaque cursor returned by scan_list session candidate pagination; pass nextCursor unchanged to continue |  |
 | `data` | `array \| string` | no | `` | `` | Registry-described bytes parameter |  |
@@ -415,7 +412,7 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 
 [INJECT] Authorized lab injection workflows, process hollowing variants, and thread hijacking helpers.
 
-- Property count: `29`
+- Property count: `28`
 - Required fields: `action`
 - Read-only hint: `False`
 - Destructive hint: `False`
@@ -493,7 +490,6 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 | `allow_protected_target` | `boolean` | no | `false` | `` | Explicit override for state-changing operations against protected or critical Windows targets |  |
 | `artifact_retention_secs` | `integer` | no | `900` | `>= 1; <= 86400` | Retention window for process-local artifact resource links emitted by this call; values outside the registry bounds are rejected before dispatch |  |
 | `as_task` | `boolean` | no | `false` | `` | Compatibility flag for task-augmented execution: run eligible read-only or dry-run calls in the process-local MCP task registry for polling/cancellation. MCP clients may prefer params.task. |  |
-| `consent_token` | `string` | no | `` | `` | Explicit consent token for policy-gated state-changing operations |  |
 | `dll_method` | `string` | no | `` | `` | DLL injection method | classic, manual_map, phantom, reflective |
 | `dll_path` | `string` | no | `` | `` | Path to DLL (required for action='dll') |  |
 | `dry_run` | `boolean` | no | `false` | `` | Preview a state-changing operation without executing it where supported |  |
@@ -522,7 +518,7 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 
 [PAYLOAD] Payload utilities: PE parsing (imports/exports/sections/IAT), obfuscation (XOR/RC4/AES-256-CTR/polymorphic/UUID/IPv4/MAC), serialization, and injection lifecycle control.
 
-- Property count: `35`
+- Property count: `34`
 - Required fields: `action`
 - Read-only hint: `False`
 - Destructive hint: `False`
@@ -587,7 +583,6 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 | `artifact_retention_secs` | `integer` | no | `900` | `>= 1; <= 86400` | Retention window for process-local artifact resource links emitted by this call; values outside the registry bounds are rejected before dispatch |  |
 | `as_task` | `boolean` | no | `false` | `` | Compatibility flag for task-augmented execution: run eligible read-only or dry-run calls in the process-local MCP task registry for polling/cancellation. MCP clients may prefer params.task. |  |
 | `base_address` | `integer \| string` | no | `` | `` | Registry-described address parameter |  |
-| `consent_token` | `string` | no | `` | `` | Explicit consent token for policy-gated state-changing operations |  |
 | `dry_run` | `boolean` | no | `false` | `` | Preview a state-changing operation without executing it where supported |  |
 | `format` | `string` | no | `"raw"` | `` | Serialization format (for serialize) | raw, struct |
 | `function` | `string` | no | `` | `` | Function name (for iat_entry lookup) |  |
@@ -620,7 +615,7 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 
 [HOOK] Function hooking: IAT patching, inline detours (JMP), and hardware breakpoints (DR0-DR3, invisible to memory integrity checks). Also supports hook removal.
 
-- Property count: `29`
+- Property count: `28`
 - Required fields: `action`
 - Read-only hint: `False`
 - Destructive hint: `False`
@@ -695,7 +690,6 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 | `allow_protected_target` | `boolean` | no | `false` | `` | Explicit override for state-changing operations against protected or critical Windows targets |  |
 | `artifact_retention_secs` | `integer` | no | `900` | `>= 1; <= 86400` | Retention window for process-local artifact resource links emitted by this call; values outside the registry bounds are rejected before dispatch |  |
 | `as_task` | `boolean` | no | `false` | `` | Compatibility flag for task-augmented execution: run eligible read-only or dry-run calls in the process-local MCP task registry for polling/cancellation. MCP clients may prefer params.task. |  |
-| `consent_token` | `string` | no | `` | `` | Explicit consent token for policy-gated state-changing operations |  |
 | `detour_address` | `integer \| string` | no | `` | `` | Registry-described detour_address parameter |  |
 | `dll_path` | `string` | no | `` | `` | DLL path for action='winhook' |  |
 | `dr_index` | `integer \| string` | no | `0` | `>= 0; <= 3` | Debug register 0-3 (hwbp) |  |
@@ -724,7 +718,7 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 
 [STEALTH] Defensive posture review plus explicitly authorized evasion lab actions for telemetry, syscall, module, and policy surfaces.
 
-- Property count: `78`
+- Property count: `77`
 - Required fields: `action`
 - Read-only hint: `False`
 - Destructive hint: `True`
@@ -861,7 +855,6 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 | `callback_index` | `integer \| string` | no | `` | `` | Kernel callback array index for callback_masquerade |  |
 | `ci_action` | `string` | no | `"patch"` | `` | CI callback/func patch action | patch, restore, query |
 | `command` | `string` | no | `` | `` | MpCmdRun command name | remove_definitions, restore_defaults, add_exclusion, remove_exclusion, scan, cancel_scan |
-| `consent_token` | `string` | no | `` | `` | Explicit consent token for policy-gated state-changing operations |  |
 | `delay_ms` | `integer \| string` | no | `5000` | `` | Sleep duration |  |
 | `delete_files` | `boolean` | no | `true` | `` | Delete dropped files on self-destruct |  |
 | `device_path` | `string` | no | `` | `` | Explicit BYOVD device path for callback_masquerade |  |
@@ -930,7 +923,7 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 
 [DETECT] EDR, hook, ETW, VM/sandbox, integrity, and forensic-tool checks.
 
-- Property count: `16`
+- Property count: `15`
 - Required fields: `action`
 - Read-only hint: `False`
 - Destructive hint: `False`
@@ -1011,7 +1004,6 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 | `allow_protected_target` | `boolean` | no | `false` | `` | Explicit override for state-changing operations against protected or critical Windows targets |  |
 | `artifact_retention_secs` | `integer` | no | `900` | `>= 1; <= 86400` | Retention window for process-local artifact resource links emitted by this call; values outside the registry bounds are rejected before dispatch |  |
 | `as_task` | `boolean` | no | `false` | `` | Compatibility flag for task-augmented execution: run eligible read-only or dry-run calls in the process-local MCP task registry for polling/cancellation. MCP clients may prefer params.task. |  |
-| `consent_token` | `string` | no | `` | `` | Explicit consent token for policy-gated state-changing operations |  |
 | `dry_run` | `boolean` | no | `false` | `` | Preview a state-changing operation without executing it where supported |  |
 | `edr_only` | `boolean` | no | `true` | `` | Suspend only known EDR processes when action='edr_suspend' |  |
 | `function` | `string` | no | `` | `` | Legacy alias for function_name in syscall_resolve |  |
@@ -1028,7 +1020,7 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 
 [PRIVILEGE] Privilege posture checks, token review, SeDebug handling, and policy-gated elevation workflows.
 
-- Property count: `21`
+- Property count: `20`
 - Required fields: `action`
 - Read-only hint: `False`
 - Destructive hint: `False`
@@ -1107,7 +1099,6 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 | `artifact_retention_secs` | `integer` | no | `900` | `>= 1; <= 86400` | Retention window for process-local artifact resource links emitted by this call; values outside the registry bounds are rejected before dispatch |  |
 | `as_task` | `boolean` | no | `false` | `` | Compatibility flag for task-augmented execution: run eligible read-only or dry-run calls in the process-local MCP task registry for polling/cancellation. MCP clients may prefer params.task. |  |
 | `command` | `string` | no | `` | `` | Command to execute elevated/as impersonated user |  |
-| `consent_token` | `string` | no | `` | `` | Explicit consent token for policy-gated state-changing operations |  |
 | `detail` | `boolean` | no | `false` | `` | Detailed output (for check) |  |
 | `dry_run` | `boolean` | no | `false` | `` | Preview a state-changing operation without executing it where supported |  |
 | `exploit` | `boolean` | no | `false` | `` | Actually exploit (for service abuse, default: scan only) |  |
@@ -1128,7 +1119,7 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 
 [KERNEL] Driver/BYOVD operations, kernel memory, callbacks, ETW, PPL, DKOM, and other policy-gated kernel workflows.
 
-- Property count: `162`
+- Property count: `161`
 - Required fields: `action`
 - Read-only hint: `False`
 - Destructive hint: `True`
@@ -1288,7 +1279,6 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 | `cb_type` | `string` | no | `` | `` | Callback family for driver_callback_nuke | process, thread, image, object, registry |
 | `ci_action` | `string` | no | `` | `` | CI callback/func patch action | patch, restore, query |
 | `cloak_action` | `string` | no | `` | `` | Driver cloak action | self, target, query |
-| `consent_token` | `string` | no | `` | `` | Explicit consent token for policy-gated state-changing operations |  |
 | `cr3` | `integer \| string` | no | `` | `` | Target process CR3 for pte_modify BYOVD page table walks |  |
 | `cr_action` | `string` | no | `` | `` | Action for driver_cr_rw | read, write |
 | `cr_index` | `integer \| string` | no | `` | `<= 4` | Control register index for driver_cr_rw |  |
@@ -1431,7 +1421,7 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 
 [SELF] Self introspection: read PEB, query heap info, memory self-test, and self-protection operations.
 
-- Property count: `44`
+- Property count: `43`
 - Required fields: `action`
 - Read-only hint: `False`
 - Destructive hint: `False`
@@ -1513,7 +1503,6 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 | `baseline_path` | `string` | no | `` | `` | Path to a saved capability/doctor/current JSON baseline for self(action='capability_diff') |  |
 | `chain_id` | `string` | no | `` | `` | Operation history filter by chain ID |  |
 | `code` | `string` | no | `` | `` | Stable tool error code for self(action='next_steps') |  |
-| `consent_token` | `string` | no | `` | `` | Explicit consent token for policy-gated state-changing operations |  |
 | `correlation_id` | `string` | no | `` | `` | Timeline filter by correlation ID across request, task, audit, worker IPC, and artifacts |  |
 | `doctor` | `object` | no | `` | `` | Doctor output for self(action='next_steps') |  |
 | `dry_run` | `boolean` | no | `false` | `` | Preview a state-changing operation without executing it where supported |  |
@@ -1551,7 +1540,7 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 
 [ORCHESTRATE] Static planning, safe templates, environment assessment, and explicitly opted-in chain execution.
 
-- Property count: `26`
+- Property count: `25`
 - Required fields: `action`
 - Read-only hint: `False`
 - Destructive hint: `False`
@@ -1622,7 +1611,6 @@ CALL THIS FIRST. Memory weapon guide & workflow assistant. Returns available cap
 | `as_task` | `boolean` | no | `false` | `` | Compatibility flag for task-augmented execution: run eligible read-only or dry-run calls in the process-local MCP task registry for polling/cancellation. MCP clients may prefer params.task. |  |
 | `benign_pid` | `integer \| string` | no | `` | `` | Explicit PID from examples/benign_test_target.rs for template='lab_validation' |  |
 | `chain_id` | `string` | no | `` | `` | Persisted chain checkpoint ID for status/resume/cancel/cleanup |  |
-| `consent_token` | `string` | no | `` | `` | Explicit consent token for policy-gated state-changing operations |  |
 | `counter_address` | `integer \| string` | no | `` | `` | Counter address printed by the benign test target for dry-run write preview only |  |
 | `cursor` | `string` | no | `` | `` | Opaque cursor returned in pagination.nextCursor; pass unchanged to continue plan/execute result pagination |  |
 | `dry_run` | `boolean` | no | `true` | `` | If true, plan but don't execute steps |  |
